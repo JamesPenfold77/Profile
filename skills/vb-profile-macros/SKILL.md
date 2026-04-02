@@ -112,9 +112,9 @@ Next  'i
 | `RuleName` | String | Descriptive name |
 | `RuleStart` | DateTime | Rule effective from |
 | `RuleFinish` | DateTime | Rule effective to |
-| `TimeStart` | DateTime | Daily session start |
-| `TimeFinish` | DateTime | Daily session end |
-| `Duration` | Integer | Minutes — Personal rules only (RuleType=0) |
+| `TimeStart` | DateTime | Daily session start — available on all rule types |
+| `TimeFinish` | DateTime | Daily session end — available on all rule types |
+| `Duration` | Integer | Minutes — **Personal rules only (RuleType=0). Raises error on other types.** |
 | `Skip` | Integer | Gap between appointments (mins) — Personal rules only |
 | `MeetingLimit` | Integer | Max concurrent — Personal rules only |
 | `TypeCode.Code` | String | Default appt type short code — may be nil, guard with On Error |
@@ -123,6 +123,27 @@ Next  'i
 | `Priority` | Integer | 0=default, 80=blockout |
 | `RuleCycleType` | Integer | 0=Absolute, 1=Weekly, 2=WeekMonthly, 5=Once |
 | `Macro` | String | Associated macro script name |
+
+### Calculating duration safely across rule types
+
+`Duration` is only valid on `sartPersonal` (RuleType=0) rules. Accessing it on
+any other rule type raises "The Personal Available Rule doesn't support the
+property Duration". For all other rule types, calculate from `TimeStart`/`TimeFinish`:
+
+```vb
+' WRONG - crashes on RuleType <> 0
+aRuleDuration = aRule.Duration
+
+' CORRECT - safe for all rule types
+Dim aRuleDuration
+If aRule.RuleType = 0 Then
+  aRuleDuration = aRule.Duration
+Else
+  ' TimeStart/TimeFinish are VB Date values; subtract to get a fraction of a day
+  ' multiply by 24*60 to convert to minutes
+  aRuleDuration = (aRule.TimeFinish - aRule.TimeStart) * 24 * 60
+End If
+```
 
 ### Guarding nullable properties
 
