@@ -103,43 +103,68 @@ For i = 0 To aRules.Count - 1
 Next  'i
 ```
 
+### ISAppointmentRule RuleType enum values
+
+**IMPORTANT:** `sartUnknown = 0` is the first value in the Delphi enum, so all
+real/bookable rule types have values > 0. Do NOT test `RuleType = 0` expecting
+to match Personal Appointment Rules — that matches nothing in practice.
+
+| RuleType value | Constant | Description |
+|---|---|---|
+| 0 | `sartUnknown` | Unknown/unrecognised — never returned for real rules |
+| 1 | `sartPersonal` | Personal Appointment Rule — bookable slots ✓ |
+| 2 | `sartPersonalAvailable` | Personal Available — marks availability, not bookable |
+| 3 | `sartCommonBlockOut` | Common Blockout — system-wide unavailability |
+| 4 | `sartPersonalBlockOut` | Personal Blockout — provider-specific unavailability |
+
+To select only bookable appointment rules (the equivalent of `sartPersonal`):
+```vb
+If aRule.RuleType > 0 Then   ' exclude sartUnknown
+  ' all real rule types — filter further as needed
+End If
+```
+
+Or to target only Personal Appointment Rules specifically:
+```vb
+If aRule.RuleType = 1 Then   ' sartPersonal only
+```
+
 ### ISAppointmentRule properties
 
 | Property | Type | Notes |
 |---|---|---|
 | `ID` | Integer | Unique rule ID |
-| `RuleType` | Integer | 0=sartPersonal, 1=sartPersonalAvailable, 2=sartCommonBlockOut, 3=sartPersonalBlockOut |
+| `RuleType` | Integer | See enum table above |
 | `RuleName` | String | Descriptive name |
 | `RuleStart` | DateTime | Rule effective from |
 | `RuleFinish` | DateTime | Rule effective to |
 | `TimeStart` | DateTime | Daily session start — available on all rule types |
 | `TimeFinish` | DateTime | Daily session end — available on all rule types |
-| `Duration` | Integer | Minutes — **Personal rules only (RuleType=0). Raises error on other types.** |
-| `Skip` | Integer | Gap between appointments (mins) — Personal rules only |
-| `MeetingLimit` | Integer | Max concurrent — Personal rules only |
-| `TypeCode.Code` | String | Default appt type short code — may be nil, guard with On Error |
-| `ProviderID` | Integer | Provider — Personal rules only |
-| `PosID` | Integer | Point of Service ID |
+| `Duration` | Integer | Minutes — **RuleType=1 (sartPersonal) only. Raises error on other types.** |
+| `Skip` | Integer | Gap between appointments (mins) — RuleType=1 only |
+| `MeetingLimit` | Integer | Max concurrent — RuleType=1 only |
+| `TypeCode.Code` | String | Default appt type short code — RuleType=1 only, may be nil |
+| `ProviderID` | Integer | Provider — personal rules only (RuleType=1,2,4) |
+| `PosID` | Integer | Point of Service ID — all rule types |
 | `Priority` | Integer | 0=default, 80=blockout |
 | `RuleCycleType` | Integer | 0=Absolute, 1=Weekly, 2=WeekMonthly, 5=Once |
 | `Macro` | String | Associated macro script name |
 
 ### Calculating duration safely across rule types
 
-`Duration` is only valid on `sartPersonal` (RuleType=0) rules. Accessing it on
-any other rule type raises "The Personal Available Rule doesn't support the
-property Duration". For all other rule types, calculate from `TimeStart`/`TimeFinish`:
+`Duration` is only valid on RuleType=1 (`sartPersonal`) rules. For all other
+types, calculate from `TimeStart`/`TimeFinish`:
 
 ```vb
-' WRONG - crashes on RuleType <> 0
+' WRONG - crashes on RuleType <> 1
 aRuleDuration = aRule.Duration
 
 ' CORRECT - safe for all rule types
 Dim aRuleDuration
-If aRule.RuleType = 0 Then
+If aRule.RuleType = 1 Then   ' sartPersonal - has Duration property
   aRuleDuration = aRule.Duration
 Else
-  ' TimeStart/TimeFinish are VB Date values; subtract to get a fraction of a day
+  ' TimeStart/TimeFinish are VB Date values; subtract to get fraction of a day,
   ' multiply by 24*60 to convert to minutes
   aRuleDuration = (aRule.TimeFinish - aRule.TimeStart) * 24 * 60
 End If
