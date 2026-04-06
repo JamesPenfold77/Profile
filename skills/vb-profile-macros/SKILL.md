@@ -217,6 +217,7 @@ Set aControl = Controls_("ControlName")
 ' List box / checked list
 aControl.RowCount          ' number of rows
 aControl.Checked(i)        ' True/False
+aControl.Cells(i, 0)       ' value in column 0 of row i
 aControl.Cells(i, 1)       ' value in column 1 of row i
 
 ' Combo box
@@ -228,6 +229,9 @@ Controls_("cboName").Text  ' selected text
 ## 6. Common Patterns
 
 ### Building a comma-separated code list from a checked listbox
+
+`GetCodes` reads column 1, which holds the code string (e.g. appointment type
+code, provider group code). Use this for lists where column 1 is the code.
 
 ```vb
 Function GetCodes(aControlName)
@@ -247,6 +251,61 @@ End Function
 ```
 
 Note: trim **2** characters (`, `), not 1.
+
+### POS location list column layout
+
+The `LstLocation` list is populated from a providers filter and uses this column layout:
+
+| Column | Content | Type |
+|---|---|---|
+| 0 | `ThisItem.ID` | Integer — POS ID, used for rule matching via `aRule.PosID` |
+| 1 | `ThisItem.Code` | String — POS code e.g. `"WGTN"` |
+| 2 | `ThisItem.FullName` | String — display name |
+
+**IMPORTANT:** `aRule.PosID` is an integer. The POS filter must compare against
+column 0 (the ID), not column 1 (the code). These are different values and will
+never match each other.
+
+LoadList population code:
+```vb
+For i = 0 To aPOSList.Count - 1
+  Set ThisItem = aPOSList.Item(i)
+  aListControl.AddRow
+  aRowNum = aRowNum + 1
+  aListControl.Cells(aRowNum, 0) = ThisItem.ID        ' POS ID — for rule matching
+  aListControl.Cells(aRowNum, 1) = ThisItem.Code      ' POS code — for display/SQL
+  aListControl.Cells(aRowNum, 2) = ThisItem.FullName  ' Full name — for display
+Next  'i
+```
+
+### Getting selected POS IDs for rule matching
+
+Use `GetPosIDs` (reads column 0) rather than `GetCodes` (reads column 1) when
+the result will be matched against `aRule.PosID`:
+
+```vb
+Function GetPosIDs(aControlName)
+  Dim aList
+  Set aList = Controls_(aControlName)
+  Dim aIDs
+  aIDs = ""
+  Dim i
+  For i = 0 To aList.RowCount - 1
+    If aList.Checked(i) = True Then
+      aIDs = aIDs & aList.Cells(i, 0) & ", "   ' column 0 = POS ID
+    End If
+  Next  'i
+  If aIDs <> "" Then aIDs = Mid(aIDs, 1, Len(aIDs) - 2)
+  GetPosIDs = aIDs
+End Function
+```
+
+Then in Main:
+```vb
+aApptCodes        = GetCodes("LstApptType")       ' codes -> column 1
+aApptProvGrpCodes = GetCodes("LstProviderGroup")  ' codes -> column 1
+ApptPosIDs        = GetPosIDs("LstLocation")      ' IDs   -> column 0
+```
 
 ### Duration range parameter
 
