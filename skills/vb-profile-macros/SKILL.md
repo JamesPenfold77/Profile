@@ -75,6 +75,8 @@ Always use `Profile.` factory methods rather than `CreateObject("Profile.xxx")`.
 | Load appointment rules | `Profile.CreateAppointmentRuleFilter` |
 | Load stored queries | `Profile.MakeFindObjectQueriesLoader()` |
 | Query run parameters | `CreateFindObjectQueryRunParam` |
+| Create provider group filter | `Profile.CreateProviderGroupFilter` |
+| Load provider groups | `Profile.LoadProviderGroups(aFilter)` |
 
 ---
 
@@ -85,11 +87,61 @@ Always use `Profile.` factory methods rather than `CreateObject("Profile.xxx")`.
 ```vb
 Dim aFilter
 Set aFilter = Profile.CreateAppointmentRuleFilter
-aFilter.DateRangeKind = 0   ' 0=sarfCurrentlyValid, 1=sarfCurrentAndFuture,
+aFilter.DateRangeKind = 4   ' 0=sarfCurrentlyValid, 1=sarfCurrentAndFuture,
                              ' 2=sarfExpired, 3=sarfValidRange, 4=sarfAll
 
 Dim aRules
 Set aRules = aFilter.Load   ' Returns ISCollection
+```
+
+**IMPORTANT — DateRangeKind selection:**
+- Use `sarfCurrentlyValid` (0) only when you want rules valid *today*.
+- When generating a report for a specific date range, use `sarfAll` (4) and
+  perform your own validity overlap check (see below). Using `sarfCurrentlyValid`
+  for a future or past report period will incorrectly exclude or include rules.
+
+### Rule validity period overlap check
+
+When reporting over a date range, always check that the rule's validity period
+overlaps the report window. `RuleFinish = 0` means the rule has no expiry date.
+
+```vb
+Dim bValidPeriod
+bValidPeriod = False
+Dim aRuleFinish
+aRuleFinish = aRule.RuleFinish
+
+If Int(aRule.RuleStart) <= Int(aReportEndDate) Then
+  If aRuleFinish = 0 Then
+    bValidPeriod = True   ' rule never expires
+  ElseIf Int(aRuleFinish) >= Int(aReportStartDate) Then
+    bValidPeriod = True   ' rule expires after the report starts
+  End If
+End If
+```
+
+### Clamping the date walk to the rule's validity window
+
+When iterating dates within a report range, clamp the walk to the intersection
+of the report period and the rule's own validity period. This avoids calling
+`CheckDayIsActive` on dates already known to be outside the rule.
+
+```vb
+Dim aWalkStart, aWalkEnd
+aWalkStart = Int(aReportStartDate)
+If Int(aRule.RuleStart) > aWalkStart Then aWalkStart = Int(aRule.RuleStart)
+
+aWalkEnd = Int(aReportEndDate)
+If aRuleFinish <> 0 And Int(aRuleFinish) < aWalkEnd Then
+  aWalkEnd = Int(aRuleFinish)
+End If
+
+Dim aDate
+aDate = aWalkStart
+Do While aDate <= aWalkEnd
+  ' ... CheckDayIsActive etc.
+  aDate = aDate + 1
+Loop  'aDate
 ```
 
 ### Iterating rules
@@ -117,14 +169,7 @@ to match Personal Appointment Rules — that matches nothing in practice.
 | 3 | `sartCommonBlockOut` | Common Blockout — system-wide unavailability |
 | 4 | `sartPersonalBlockOut` | Personal Blockout — provider-specific unavailability |
 
-To select only bookable appointment rules (the equivalent of `sartPersonal`):
-```vb
-If aRule.RuleType > 0 Then   ' exclude sartUnknown
-  ' all real rule types — filter further as needed
-End If
-```
-
-Or to target only Personal Appointment Rules specifically:
+To target only Personal Appointment Rules:
 ```vb
 If aRule.RuleType = 1 Then   ' sartPersonal only
 ```
@@ -137,7 +182,7 @@ If aRule.RuleType = 1 Then   ' sartPersonal only
 | `RuleType` | Integer | See enum table above |
 | `RuleName` | String | Descriptive name |
 | `RuleStart` | DateTime | Rule effective from |
-| `RuleFinish` | DateTime | Rule effective to |
+| `RuleFinish` | DateTime | Rule effective to — **0 means no expiry** |
 | `TimeStart` | DateTime | Daily session start — available on all rule types |
 | `TimeFinish` | DateTime | Daily session end — available on all rule types |
 | `Duration` | Integer | Minutes — **RuleType=1 (sartPersonal) only. Raises error on other types.** |
@@ -149,6 +194,7 @@ If aRule.RuleType = 1 Then   ' sartPersonal only
 | `Priority` | Integer | 0=default, 80=blockout |
 | `RuleCycleType` | Integer | 0=Absolute, 1=Weekly, 2=WeekMonthly, 5=Once |
 | `Macro` | String | Associated macro script name |
+| `CheckDayIsActive(aDate)` | Boolean | Returns True if rule fires on the given date — handles all cycle logic internally |
 
 ### Calculating duration safely across rule types
 
@@ -184,7 +230,82 @@ On Error GoTo 0
 
 ---
 
-## 4. Profile Type Library — Stored Query API
+## 4. Profile Type Library — Provider Group API
+
+### Loading groups by code and testing provider membership
+
+```vb
+' Create a filter and load matching groups
+Dim aGrpFilter
+Set aGrpFilter = Profile.CreateProviderGroupFilter
+aGrpFilter.Code = "GP"   ' group code to find
+
+Dim aGroups
+Set aGroups = Profile.LoadProviderGroups(aGrpFilter)
+
+' Test whether a provider belongs to the group
+If aGroups.Count > 0 Then
+  Dim aGrpObj
+  Set aGrpObj = aGroups.Item(0)   ' ISProviderGroup
+  If aGrpObj.ContainsPPPU(aRule.ProviderID) Then
+    ' provider is a member
+  End If
+End If
+```
+
+### ISProviderGroup properties and methods
+
+| Member | Type | Notes |
+|---|---|---|
+| `ID` | Integer | Group ID |
+| `Code` | String | Group code e.g. `"GP"` |
+| `Name` | String | Display name |
+| `ContainsPPPU(aPppuID)` | Boolean | True if provider is a current member |
+| `ContainsPPPUOnDate(aPppuID, aDate)` | Boolean | True if provider was a member on the given date |
+| `PPPUMembers` | ISProviders | All current provider members |
+
+### Pattern: pre-load group objects for efficient multi-rule checking
+
+When filtering many rules by group, load the group objects once into a dictionary
+before the rule loop, then call `ContainsPPPU` per rule:
+
+```vb
+Dim aGroupObjDict
+Set aGroupObjDict = CreateObject("Scripting.Dictionary")
+Dim aToken
+For Each aToken In Split(aProvGrpCodes, ",")
+  aToken = Trim(aToken)
+  If aToken <> "" And Not aGroupObjDict.Exists(aToken) Then
+    Dim aGrpFilter
+    Set aGrpFilter = Profile.CreateProviderGroupFilter
+    aGrpFilter.Code = aToken
+    Dim aGroups
+    Set aGroups = Profile.LoadProviderGroups(aGrpFilter)
+    If aGroups.Count > 0 Then
+      aGroupObjDict.Add aToken, aGroups.Item(0)
+    End If
+  End If
+Next  'aToken
+
+' Then per rule:
+Dim bProvGrpMatch
+bProvGrpMatch = True
+If aGroupObjDict.Count > 0 Then
+  bProvGrpMatch = False
+  Dim aGrpCode
+  For Each aGrpCode In aGroupObjDict.Keys
+    Dim aGrpObj
+    Set aGrpObj = aGroupObjDict(aGrpCode)
+    If aGrpObj.ContainsPPPU(aRule.ProviderID) Then
+      bProvGrpMatch = True
+    End If
+  Next  'aGrpCode
+End If
+```
+
+---
+
+## 5. Profile Type Library — Stored Query API
 
 ```vb
 Dim aFilter
@@ -208,7 +329,7 @@ aQuery.Run(aRunParam)
 
 ---
 
-## 5. Form Controls API
+## 6. Form Controls API
 
 ```vb
 ' Get a control by name
@@ -226,7 +347,7 @@ Controls_("cboName").Text  ' selected text
 
 ---
 
-## 6. Common Patterns
+## 7. Common Patterns
 
 ### Building a comma-separated code list from a checked listbox
 
@@ -349,7 +470,7 @@ keys to avoid collisions:
 
 ---
 
-## 7. Variable Declaration
+## 8. Variable Declaration
 
 - Place all module-level `Dim` statements **at the top of the module**, before
   any `Sub` or `Function`.
@@ -359,7 +480,7 @@ keys to avoid collisions:
 
 ---
 
-## 8. Error Handling
+## 9. Error Handling
 
 Wrap all file I/O and Profile API calls in error handling:
 
@@ -375,11 +496,12 @@ On Error GoTo 0
 
 ---
 
-## 9. Source References
+## 10. Source References
 
-- COM scripting layer: `Profile/Common/Infrastructure/Scripting/USAppointmentRule.pas`
-- Filter interface:    `Profile/Common/Infrastructure/Scripting/USAppointmentRuleFilter.pas`
-- Business logic:      `Profile/Common/Business/UBAppointmentRules.pas`
-- Technical overview:  `docs/Technical/Appointments/appointment-rules-and-templates-overview.md`
+- COM scripting layer (rules):    `Profile/Common/Infrastructure/Scripting/USAppointmentRule.pas`
+- COM scripting layer (groups):   `Profile/Common/Infrastructure/Scripting/USProviderGroups.pas`
+- Filter interface (rules):       `Profile/Common/Infrastructure/Scripting/USAppointmentRuleFilter.pas`
+- Business logic (rules):         `Profile/Common/Business/UBAppointmentRules.pas`
+- Technical overview:             `docs/Technical/Appointments/appointment-rules-and-templates-overview.md`
 
 All in repo: `https://github.com/intrahealth-source/profile`
