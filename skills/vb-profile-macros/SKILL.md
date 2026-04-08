@@ -17,6 +17,9 @@ The following constraints apply:
   Use `Next` alone and add the variable as a comment: `Next  'i`
 - **No `On Error GoTo label`** — use `On Error Resume Next` followed by
   explicit error checks, then `On Error GoTo 0` to restore normal handling.
+- **No `Format()` function** — raises "Type mismatch: 'Format'" at runtime.
+  Use `FormatDateTime` for dates, and a manual `FormatTime` helper for times
+  (see section 7).
 
 ### Correct patterns
 
@@ -62,6 +65,16 @@ On Error GoTo 0
 If aValue = "" Then
   ' handle the error case
 End If
+```
+
+```vb
+' WRONG - Format() not available
+Format(aDate, "dd/mm/yyyy")
+Format(aTime, "hh:mm")
+
+' CORRECT - use FormatDateTime for dates, FormatTime helper for times
+FormatDateTime(aDate, 2)   ' 2 = vbShortDate
+FormatTime(aTime)          ' see FormatTime / PadTwo in section 7
 ```
 
 ---
@@ -449,6 +462,45 @@ Controls_("cboName").Text  ' selected text
 ---
 
 ## 7. Common Patterns
+
+### Date and time formatting
+
+`Format()` is **not available** in the Profile VB scripting environment — it raises
+a "Type mismatch: 'Format'" runtime error. Use the following instead:
+
+```vb
+' Dates — use FormatDateTime with vbShortDate (2)
+FormatDateTime(aDate, 2)   ' e.g. "08/04/2026" per locale short date setting
+
+' Times — Format() not available; use this helper pair instead:
+Function PadTwo(n)
+  If n < 10 Then
+    PadTwo = "0" & CStr(n)
+  Else
+    PadTwo = CStr(n)
+  End If
+End Function
+
+Function FormatTime(aTime)
+  ' Extracts hh:mm from a DateTime value (ignores date portion)
+  Dim aTotalMins
+  aTotalMins = CInt(Int((aTime - Int(aTime)) * 1440 + 0.5))
+  FormatTime = PadTwo(aTotalMins \ 60) & ":" & PadTwo(aTotalMins Mod 60)
+End Function
+```
+
+Usage:
+```vb
+aRept.AddText Join(Array( _
+  aRule.RuleName, _
+  FormatDateTime(aDate, 2), _
+  FormatTime(aSlotStart), _
+  FormatTime(aSlotEnd), _
+  CStr(aRule.Duration), _
+  CStr(aRule.ProviderID), _
+  CStr(aRule.PosID), _
+  aTypeCode), vbTab)
+```
 
 ### Building a comma-separated code list from a checked listbox
 
