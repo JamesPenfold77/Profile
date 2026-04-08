@@ -87,8 +87,10 @@ Always use `Profile.` factory methods rather than `CreateObject("Profile.xxx")`.
 ```vb
 Dim aFilter
 Set aFilter = Profile.CreateAppointmentRuleFilter
-aFilter.DateRangeKind = 4   ' 0=sarfCurrentlyValid, 1=sarfCurrentAndFuture,
+aFilter.DateRangeKind = 3   ' 0=sarfCurrentlyValid, 1=sarfCurrentAndFuture,
                              ' 2=sarfExpired, 3=sarfValidRange, 4=sarfAll
+aFilter.StartDate = aStartDate
+aFilter.EndDate   = aEndDate
 
 Dim aRules
 Set aRules = aFilter.Load   ' Returns ISCollection
@@ -96,42 +98,27 @@ Set aRules = aFilter.Load   ' Returns ISCollection
 
 **IMPORTANT — DateRangeKind selection:**
 - Use `sarfCurrentlyValid` (0) only when you want rules valid *today*.
-- When generating a report for a specific date range, use `sarfAll` (4) and
-  perform your own validity overlap check (see below). Using `sarfCurrentlyValid`
-  for a future or past report period will incorrectly exclude or include rules.
-
-### Rule validity period overlap check
-
-When reporting over a date range, always check that the rule's validity period
-overlaps the report window. `RuleFinish = 0` means the rule has no expiry date.
-
-```vb
-Dim bValidPeriod
-bValidPeriod = False
-Dim aRuleFinish
-aRuleFinish = aRule.RuleFinish
-
-If Int(aRule.RuleStart) <= Int(aReportEndDate) Then
-  If aRuleFinish = 0 Then
-    bValidPeriod = True   ' rule never expires
-  ElseIf Int(aRuleFinish) >= Int(aReportStartDate) Then
-    bValidPeriod = True   ' rule expires after the report starts
-  End If
-End If
-```
+- When generating a report for a specific date range, use `sarfValidRange` (3)
+  with `StartDate`/`EndDate` so the server pre-excludes rules whose validity
+  period doesn't overlap the report window.
+- `Providers` and `POSes` on the filter are server-side integer collections and
+  should be populated before calling `.Load` to reduce the result set.
 
 ### Clamping the date walk to the rule's validity window
 
-When iterating dates within a report range, clamp the walk to the intersection
-of the report period and the rule's own validity period. This avoids calling
-`CheckDayIsActive` on dates already known to be outside the rule.
+Even with `sarfValidRange`, a rule's validity period may only partially overlap
+the report range. Clamp the date walk to the intersection to avoid calling
+`CheckDayIsActive` on dates outside the rule.
 
 ```vb
+Dim aRuleFinish
+aRuleFinish = aRule.RuleFinish
+
 Dim aWalkStart, aWalkEnd
-aWalkStart = Int(aReportStartDate)
+aWalkStart = Int(aStartDate)
 If Int(aRule.RuleStart) > aWalkStart Then aWalkStart = Int(aRule.RuleStart)
 
-aWalkEnd = Int(aReportEndDate)
+aWalkEnd = Int(aEndDate)
 If aRuleFinish <> 0 And Int(aRuleFinish) < aWalkEnd Then
   aWalkEnd = Int(aRuleFinish)
 End If
@@ -139,7 +126,9 @@ End If
 Dim aDate
 aDate = aWalkStart
 Do While aDate <= aWalkEnd
-  ' ... CheckDayIsActive etc.
+  If CheckDayIsActive(aRule, aDate) Then
+    ' ... expand slots
+  End If
   aDate = aDate + 1
 Loop  'aDate
 ```
@@ -193,8 +182,112 @@ If aRule.RuleType = 1 Then   ' sartPersonal only
 | `PosID` | Integer | Point of Service ID — all rule types |
 | `Priority` | Integer | 0=default, 80=blockout |
 | `RuleCycleType` | Integer | 0=Absolute, 1=Weekly, 2=WeekMonthly, 5=Once |
+| `RulePeriod` | Integer | Cycle period in days (Weekly) or used by Absolute |
+| `RuleDayCount` | Integer | Number of active day entries |
+| `RuleDay(i)` | Integer | Day index value for entry i (1-based, sorted ascending) |
 | `Macro` | String | Associated macro script name |
-| `CheckDayIsActive(aDate)` | Boolean | Returns True if rule fires on the given date — handles all cycle logic internally |
+
+**`CheckDayIsActive` is NOT exposed through the COM scripting layer.**
+Use the `CheckDayIsActive` VB function below instead.
+
+### CheckDayIsActive — VB reimplementation
+
+`CheckDayIsActive` exists on the internal Delphi `IBAppointmentRule` interface
+but is not exposed via `ISAppointmentRule`. Use this VB function, translated
+directly from `_TBAppointmentRule.CheckDayIsActive` in `UBAppointmentRules.pas`.
+
+RuleCycleType values: 0=Absolute, 1=Weekly, 2=WeekMonthly, 5=Once.
+
+```vb
+' CheckDayIsActive — VB reimplementation of _TBAppointmentRule.CheckDayIsActive
+' Returns True if aRule fires on aDate. Pass a pure date (no time component).
+' Source: Profile/Common/Business/UBAppointmentRules.pas
+Function CheckDayIsActive(aRule, aDate)
+  CheckDayIsActive = False
+
+  Dim aDay
+  aDay = Int(aDate)
+
+  ' Must be within the rule's validity window
+  If Int(aRule.RuleStart) > aDay Then Exit Function
+  If aRule.RuleFinish <> 0 And Int(aRule.RuleFinish) < aDay Then Exit Function
+
+  Dim aCycleDay
+  Dim aCycleType
+  aCycleType = aRule.RuleCycleType
+
+  ' sarctOnce (5) — fires on every day within the validity window
+  If aCycleType = 5 Then
+    CheckDayIsActive = True
+    Exit Function
+
+  ' sarctAbsolute (0)
+  ElseIf aCycleType = 0 Then
+    Dim aMaxDayAbs
+    If aRule.RulePeriod > 0 Then
+      aMaxDayAbs = aRule.RulePeriod
+    Else
+      aMaxDayAbs = 1
+    End If
+    aCycleDay = (Int(aDay) - Int(aRule.RuleStart)) Mod aMaxDayAbs + 1
+
+  ' sarctWeekly (1)
+  ElseIf aCycleType = 1 Then
+    ' Find Monday of the week containing RuleStart.
+    ' VB Weekday: 1=Sun,2=Mon...7=Sat  (same as Delphi DayOfWeek)
+    ' Delphi: i = DayOfWeek(RuleStart)-2; if i<0 then i+=7  => 0=Mon..6=Sun
+    Dim iWeek
+    iWeek = Weekday(aRule.RuleStart) - 2
+    If iWeek < 0 Then iWeek = iWeek + 7
+    Dim aBaseWeek
+    aBaseWeek = Int(aRule.RuleStart) - iWeek
+    Dim aMaxDayWeek
+    If aRule.RulePeriod > 0 Then
+      ' Round up to full weeks: period + (6 - ((period-1) mod 7))
+      aMaxDayWeek = aRule.RulePeriod + (6 - ((aRule.RulePeriod - 1) Mod 7))
+    Else
+      aMaxDayWeek = 7
+    End If
+    aCycleDay = (Int(aDay) - Int(aBaseWeek)) Mod aMaxDayWeek + 1
+
+  ' sarctWeekMonthly (2)
+  ElseIf aCycleType = 2 Then
+    Dim aYear, aMonth, aDayNum
+    aYear   = Year(aDay)
+    aMonth  = Month(aDay)
+    aDayNum = Day(aDay)
+    Dim aMonthStart
+    aMonthStart = DateSerial(aYear, aMonth, 1)
+    ' iWM = DayOfWeek(aMonthStart)-1; if iWM<1 then iWM+=7
+    Dim iWM
+    iWM = Weekday(aMonthStart) - 1
+    If iWM < 1 Then iWM = iWM + 7
+    aCycleDay = ((aDayNum - 1) Mod 7) + iWM
+    If aCycleDay > 7 Then aCycleDay = aCycleDay - 7
+    aCycleDay = aCycleDay + ((aDayNum - 1) \ 7) * 7
+
+  Else
+    Exit Function   ' unsupported cycle type
+  End If
+
+  ' Check aCycleDay against the rule's stored active day list
+  Dim aDayCount
+  aDayCount = aRule.RuleDayCount
+  If aDayCount > 0 Then
+    Dim j
+    For j = 0 To aDayCount - 1
+      If aRule.RuleDay(j) = aCycleDay Then
+        CheckDayIsActive = True
+        Exit Function
+      End If
+    Next  'j
+  Else
+    ' No days configured — fires only on cycle day 1
+    If aCycleDay = 1 Then CheckDayIsActive = True
+  End If
+
+End Function
+```
 
 ### Calculating duration safely across rule types
 
@@ -202,16 +295,10 @@ If aRule.RuleType = 1 Then   ' sartPersonal only
 types, calculate from `TimeStart`/`TimeFinish`:
 
 ```vb
-' WRONG - crashes on RuleType <> 1
-aRuleDuration = aRule.Duration
-
-' CORRECT - safe for all rule types
 Dim aRuleDuration
-If aRule.RuleType = 1 Then   ' sartPersonal - has Duration property
+If aRule.RuleType = 1 Then
   aRuleDuration = aRule.Duration
 Else
-  ' TimeStart/TimeFinish are VB Date values; subtract to get fraction of a day,
-  ' multiply by 24*60 to convert to minutes
   aRuleDuration = (aRule.TimeFinish - aRule.TimeStart) * 24 * 60
 End If
 ```
