@@ -232,21 +232,35 @@ On Error GoTo 0
 
 ## 4. Profile Type Library — Provider Group API
 
+### ISProviderGroups — use .Items(n) not .Item(n)
+
+**IMPORTANT:** The `ISProviderGroups` collection uses `.Items(n)` (plural) to
+access elements, not `.Item(n)`. Using `.Item(n)` causes a runtime error.
+
+```vb
+' WRONG
+Set aGrpObj = aGroups.Item(0)
+
+' CORRECT
+Set aGrpObj = aGroups.Items(0)
+```
+
+Note: `ISCollection` (returned by appointment rule filter `.Load`) uses `.Item(n)`.
+The two collections have different accessor names — always check which type you have.
+
 ### Loading groups by code and testing provider membership
 
 ```vb
-' Create a filter and load matching groups
 Dim aGrpFilter
 Set aGrpFilter = Profile.CreateProviderGroupFilter
-aGrpFilter.Code = "GP"   ' group code to find
+aGrpFilter.Code = "GP"
 
 Dim aGroups
 Set aGroups = Profile.LoadProviderGroups(aGrpFilter)
 
-' Test whether a provider belongs to the group
 If aGroups.Count > 0 Then
   Dim aGrpObj
-  Set aGrpObj = aGroups.Item(0)   ' ISProviderGroup
+  Set aGrpObj = aGroups.Items(0)   ' ISProviderGroup — note: Items not Item
   If aGrpObj.ContainsPPPU(aRule.ProviderID) Then
     ' provider is a member
   End If
@@ -282,7 +296,7 @@ For Each aToken In Split(aProvGrpCodes, ",")
     Dim aGroups
     Set aGroups = Profile.LoadProviderGroups(aGrpFilter)
     If aGroups.Count > 0 Then
-      aGroupObjDict.Add aToken, aGroups.Item(0)
+      aGroupObjDict.Add aToken, aGroups.Items(0)  ' note: Items not Item
     End If
   End If
 Next  'aToken
