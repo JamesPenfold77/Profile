@@ -178,7 +178,7 @@ Sub BuildAuditReport(aPatientListFile, aDateStart, aDateEnd, aExcludeGroupCode)
     "Demographic Details Accessed", _
     "Encounter Created?"), vbTab)
 
-  ' ---- Provider info cache: key=PPPUID, value=tab-delimited "FullName|Role|POS" ----
+  ' ---- Provider info cache: key=PPPUID, value="FullName|Role|POS" ----
   Dim aProviderCache
   Set aProviderCache = CreateObject("Scripting.Dictionary")
 
@@ -190,25 +190,23 @@ Sub BuildAuditReport(aPatientListFile, aDateStart, aDateEnd, aExcludeGroupCode)
     Dim aLine
     aLine = Trim(aFileStream.ReadLine)
 
-    ' Skip blank lines; skip header rows (non-numeric first character)
+    ' Skip blank lines and header rows (header rows start with a non-alphanumeric
+    ' character or the literal word "Filenum" / column heading text)
     Dim bSkipLine
     bSkipLine = False
     If aLine = "" Then bSkipLine = True
     If Not bSkipLine Then
-      If Not IsNumeric(Left(aLine, 1)) Then bSkipLine = True
+      If Not IsNumeric(Left(aLine, 1)) And UCase(Left(aLine, 1)) < "A" Then bSkipLine = True
     End If
 
     If Not bSkipLine Then
-      ' First tab-delimited field is the filenum
+      ' First tab-delimited field is the filenum (alpha-numeric string)
       Dim aLineFields
       aLineFields = Split(aLine, vbTab)
       Dim aFileNum
-      aFileNum = 0
-      On Error Resume Next
-      aFileNum = CInt(Trim(aLineFields(0)))
-      On Error GoTo 0
+      aFileNum = Trim(aLineFields(0))   ' kept as String - filenums are alpha-numeric
 
-      If aFileNum > 0 Then
+      If aFileNum <> "" Then
         Call ProcessPatient(aFileNum, aDateStart, aDateEnd, aExcludeGroup, aProviderCache)
       End If
     End If
@@ -231,7 +229,7 @@ Sub ProcessPatient(aFileNum, aDateStart, aDateEnd, aExcludeGroup, aProviderCache
   On Error Resume Next
   Set aPatient = Profile.LoadPatientByFilenum(aFileNum)
   If Err.Number <> 0 Then
-    aRept.AddText "WARN: Could not load patient filenum " & CStr(aFileNum) & ": " & Err.Description
+    aRept.AddText "WARN: Could not load patient filenum " & aFileNum & ": " & Err.Description
     Err.Clear
     On Error GoTo 0
     Exit Sub
@@ -257,8 +255,8 @@ Sub ProcessPatient(aFileNum, aDateStart, aDateEnd, aExcludeGroup, aProviderCache
   Dim aNHI
   Dim aLabelName
   Dim aPatientPOS
-  aNHI       = ""
-  aLabelName = ""
+  aNHI        = ""
+  aLabelName  = ""
   aPatientPOS = ""
 
   On Error Resume Next
@@ -268,7 +266,6 @@ Sub ProcessPatient(aFileNum, aDateStart, aDateEnd, aExcludeGroup, aProviderCache
   On Error GoTo 0
 
   ' ---- Build ISPatientAuditFilter for this patient ----
-  ' Filter by PatientID; date range pre-filters are set to the report window.
   ' MaxCount = 0 means no server-side row cap.
   Dim aAuditFilter   ' ISPatientAuditFilter
   Set aAuditFilter = Profile.MakePatientAuditFilter
@@ -284,7 +281,7 @@ Sub ProcessPatient(aFileNum, aDateStart, aDateEnd, aExcludeGroup, aProviderCache
   On Error Resume Next
   Set aAuditLog = aAuditFilter.Load
   If Err.Number <> 0 Then
-    aRept.AddText "WARN: Could not load audit log for filenum " & CStr(aFileNum) & ": " & Err.Description
+    aRept.AddText "WARN: Could not load audit log for filenum " & aFileNum & ": " & Err.Description
     Err.Clear
     On Error GoTo 0
     Exit Sub
@@ -315,8 +312,6 @@ Sub ProcessPatient(aFileNum, aDateStart, aDateEnd, aExcludeGroup, aProviderCache
     If bIsClinical Or bIsDemographic Then
 
       ' Condition 2: Access date within report range
-      ' (Server filter already pre-filters by StartDate/EndDate, but we
-      ' validate here in case of timezone edge cases.)
       Dim aStarted
       aStarted = 0
       On Error Resume Next
@@ -355,7 +350,6 @@ Sub ProcessPatient(aFileNum, aDateStart, aDateEnd, aExcludeGroup, aProviderCache
         If Not bExcluded Then
           ' All conditions met - write the report line
           Call WriteReportLine( _
-            aEntry, _
             aNHI, aLabelName, aPatientPOS, _
             aAccessedBy, aAuditType, aStarted, _
             aProviderCache)
@@ -372,8 +366,7 @@ End Sub
 ' Resolves provider details (with caching), formats all columns, and writes
 ' one tab-delimited line to the report output window.
 '==============================================================================
-Sub WriteReportLine(aEntry, _
-                    aNHI, aLabelName, aPatientPOS, _
+Sub WriteReportLine(aNHI, aLabelName, aPatientPOS, _
                     aAccessedBy, aAuditType, aStarted, _
                     aProviderCache)
 
