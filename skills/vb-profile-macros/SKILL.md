@@ -348,25 +348,6 @@ Set aGrpObj = aGroups.Items(0)
 Note: `ISCollection` (returned by appointment rule filter `.Load`) uses `.Item(n)`.
 The two collections have different accessor names — always check which type you have.
 
-### Loading groups by code and testing provider membership
-
-```vb
-Dim aGrpFilter
-Set aGrpFilter = Profile.CreateProviderGroupFilter
-aGrpFilter.Code = "GP"
-
-Dim aGroups
-Set aGroups = Profile.LoadProviderGroups(aGrpFilter)
-
-If aGroups.Count > 0 Then
-  Dim aGrpObj
-  Set aGrpObj = aGroups.Items(0)   ' ISProviderGroup — note: Items not Item
-  If aGrpObj.ContainsPPPU(aRule.ProviderID) Then
-    ' provider is a member
-  End If
-End If
-```
-
 ### ISProviderGroup properties and methods
 
 | Member | Type | Notes |
@@ -374,46 +355,116 @@ End If
 | `ID` | Integer | Group ID |
 | `Code` | String | Group code e.g. `"GP"` |
 | `Name` | String | Display name |
-| `ContainsPPPU(aPppuID)` | Boolean | True if provider is a current member |
-| `ContainsPPPUOnDate(aPppuID, aDate)` | Boolean | True if provider was a member on the given date |
-| `PPPUMembers` | ISProviders | All current provider members |
+| `ContainsPPPU(aPppuID)` | Boolean | True if provider is a **direct** current member (does NOT recurse into sub-groups) |
+| `ContainsPPPUOnDate(aPppuID, aDate)` | Boolean | True if provider was a direct member on the given date |
+| `PPPUMembers` | ISProviders | Direct provider members of this group |
+| `GroupMembers` | ISProviderGroups | Child groups nested inside this group |
 
-### Pattern: pre-load group objects for efficient multi-rule checking
+### Provider groups are recursive — always use CollectProviderCodes
 
-When filtering many rules by group, load the group objects once into a dictionary
-before the rule loop, then call `ContainsPPPU` per rule:
+**CRITICAL:** Provider groups can contain both providers (`PPPUMembers`) and nested
+child groups (`GroupMembers`). `ContainsPPPU` only tests **direct** membership —
+it does NOT recurse into sub-groups.
+
+**WRONG — misses providers in sub-groups:**
+```vb
+' This only checks direct PPPU members; child groups are silently ignored
+If aGrpObj.ContainsPPPU(aRule.ProviderID) Then ...
+```
+
+**CORRECT — always use the recursive helper below.**
+
+The canonical pattern is to resolve all group codes into a flat dictionary of
+`Provider.Code -> Provider.ID` before the rule loop, using a recursive walk that
+descends into `GroupMembers` to any depth. Use `Provider.Code` (not ID) as the
+key because it is the stable, human-meaningful identifier.
 
 ```vb
-Dim aGroupObjDict
-Set aGroupObjDict = CreateObject("Scripting.Dictionary")
-Dim aToken
-For Each aToken In Split(aProvGrpCodes, ",")
-  aToken = Trim(aToken)
-  If aToken <> "" And Not aGroupObjDict.Exists(aToken) Then
-    Dim aGrpFilter
-    Set aGrpFilter = Profile.CreateProviderGroupFilter
-    aGrpFilter.Code = aToken
-    Dim aGroups
-    Set aGroups = Profile.LoadProviderGroups(aGrpFilter)
-    If aGroups.Count > 0 Then
-      aGroupObjDict.Add aToken, aGroups.Items(0)  ' note: Items not Item
-    End If
-  End If
-Next  'aToken
+' CollectProviderCodes — recursively collects Provider.Code -> Provider.ID
+' into aCodeDict from aGrpObj and all its nested child groups.
+' aVisitedIDs (Dictionary of group ID strings) prevents infinite loops
+' from circular group references.
+Sub CollectProviderCodes(aGrpObj, aCodeDict, aVisitedIDs)
+  Dim aGrpID
+  aGrpID = CStr(aGrpObj.ID)
+  If aVisitedIDs.Exists(aGrpID) Then Exit Sub
+  aVisitedIDs.Add aGrpID, 1
 
-' Then per rule:
+  ' Add direct PPPU members by Code
+  Dim aMembers
+  Set aMembers = aGrpObj.PPPUMembers
+  Dim m
+  For m = 0 To aMembers.Count - 1
+    Dim aMember
+    Set aMember = aMembers.Item(m)
+    Dim aCode
+    aCode = aMember.Code
+    If aCode <> "" And Not aCodeDict.Exists(aCode) Then
+      aCodeDict.Add aCode, aMember.ID
+    End If
+  Next  'm
+
+  ' Recurse into child groups
+  Dim aChildGroups
+  Set aChildGroups = aGrpObj.GroupMembers
+  Dim g
+  For g = 0 To aChildGroups.Count - 1
+    CollectProviderCodes aChildGroups.Items(g), aCodeDict, aVisitedIDs
+  Next  'g
+End Sub
+```
+
+### Pattern: resolve group codes to a flat provider code dictionary
+
+Call this once before the rule loop. The resulting `aProviderCodeDict` maps
+`Provider.Code` (string) to `Provider.ID` (integer).
+
+```vb
+Dim aProviderCodeDict
+Set aProviderCodeDict = CreateObject("Scripting.Dictionary")
+
+If aProvGrpCodes <> "" Then
+  Dim aToken
+  For Each aToken In Split(aProvGrpCodes, ",")
+    aToken = Trim(aToken)
+    If aToken <> "" Then
+      Dim aGrpFilter
+      Set aGrpFilter = Profile.CreateProviderGroupFilter
+      aGrpFilter.Code = aToken
+      Dim aGroups
+      Set aGroups = Profile.LoadProviderGroups(aGrpFilter)
+      If aGroups.Count > 0 Then
+        Dim aVisited
+        Set aVisited = CreateObject("Scripting.Dictionary")
+        CollectProviderCodes aGroups.Items(0), aProviderCodeDict, aVisited
+      End If
+    End If
+  Next  'aToken
+End If
+
+' Populate server-side provider filter from the resolved IDs:
+If aProviderCodeDict.Count > 0 Then
+  Dim aProvCode
+  For Each aProvCode In aProviderCodeDict.Keys
+    aFilter.Providers.Add CInt(aProviderCodeDict(aProvCode))
+  Next  'aProvCode
+End If
+```
+
+### Per-rule membership check using Provider.Code
+
+```vb
+' Get the rule's provider Code (cached per-rule to avoid repeated loads)
+Dim aRuleProvCode
+aRuleProvCode = ""
+On Error Resume Next
+aRuleProvCode = Profile.LoadProvider(aRule.ProviderID).Code
+On Error GoTo 0
+
 Dim bProvGrpMatch
 bProvGrpMatch = True
-If aGroupObjDict.Count > 0 Then
-  bProvGrpMatch = False
-  Dim aGrpCode
-  For Each aGrpCode In aGroupObjDict.Keys
-    Dim aGrpObj
-    Set aGrpObj = aGroupObjDict(aGrpCode)
-    If aGrpObj.ContainsPPPU(aRule.ProviderID) Then
-      bProvGrpMatch = True
-    End If
-  Next  'aGrpCode
+If aProviderCodeDict.Count > 0 Then
+  bProvGrpMatch = (aRuleProvCode <> "" And aProviderCodeDict.Exists(aRuleProvCode))
 End If
 ```
 
