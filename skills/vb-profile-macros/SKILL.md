@@ -314,6 +314,66 @@ Function CheckDayIsActive(aRule, aDate)
 End Function
 ```
 
+### IsSlotBooked — returns booking status string
+
+Returns a string indicating the status of a slot:
+- `""` — available (no overlapping appointment)
+- `"Booked"` — overlapping non-cancelled appointment with a patient (`PatientId > 0`)
+- `"Locked"` — overlapping non-cancelled appointment with no patient (e.g. a blocked slot)
+
+`aSlotStart` and `aSlotEnd` must carry the full date+time (not just the time fraction).
+Use `Profile.LoadProviderById` — NOT `Profile.LoadProvider` — when loading by integer ID.
+
+```vb
+Function IsSlotBooked(aProviderID, aPosID, aDate, aSlotStart, aSlotEnd)
+  IsSlotBooked = ""
+  Dim aProvider
+  Set aProvider = Profile.LoadProviderById(aProviderID)
+  Dim aAppts
+  Set aAppts = aProvider.LoadAppointments(aDate, "")
+  Dim k
+  For k = 0 To aAppts.Count - 1
+    Dim aAppt
+    Set aAppt = aAppts.Item(k)
+    If aAppt.PosID = aPosID And Not aAppt.IsCancelled Then
+      Dim aApptStart, aApptEnd
+      aApptStart = aAppt.BookTime
+      aApptEnd   = aAppt.BookTime + (aAppt.Duration / 1440)
+      If aApptStart < aSlotEnd And aApptEnd > aSlotStart Then
+        If aAppt.PatientId > 0 Then
+          IsSlotBooked = "Booked"
+        Else
+          IsSlotBooked = "Locked"
+        End If
+        Exit Function
+      End If
+    End If
+  Next  'k
+End Function
+```
+
+### Calling IsSlotBooked in GenerateSlotReport
+
+```vb
+  ' Booking status check — sBookedStatus is "", "Booked", or "Locked"
+  Dim sBookedStatus
+  sBookedStatus = IsSlotBooked(aRule.ProviderID, aRule.PosID, aDate, aSlotStart, aSlotEnd)
+
+  If bIncludeBooked Or sBookedStatus = "" Then
+    aRept.AddRow
+    aRowNum = aRowNum + 1
+    aRept.Cells(aRowNum, 0).Value = aRule.RuleName
+    aRept.Cells(aRowNum, 1).Value = aProvFullName
+    aRept.Cells(aRowNum, 2).Value = FormatDateTime(aDate, 2)
+    aRept.Cells(aRowNum, 3).Value = FormatTime(aSlotStart)
+    aRept.Cells(aRowNum, 4).Value = FormatTime(aSlotEnd)
+    aRept.Cells(aRowNum, 5).Value = CStr(aRule.Duration)
+    aRept.Cells(aRowNum, 6).Value = CStr(aRule.PosID)
+    aRept.Cells(aRowNum, 7).Value = aTypeCode
+    aRept.Cells(aRowNum, 8).Value = sBookedStatus   ' "", "Booked", or "Locked"
+  End If
+```
+
 ### Calculating duration safely across rule types
 
 `Duration` is only valid on RuleType=1 (`sartPersonal`) rules. For all other
