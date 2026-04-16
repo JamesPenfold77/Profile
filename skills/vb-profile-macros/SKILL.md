@@ -20,6 +20,12 @@ The following constraints apply:
 - **No `Format()` function** — raises "Type mismatch: 'Format'" at runtime.
   Use `FormatDateTime` for dates, and a manual `FormatTime` helper for times
   (see section 7).
+- **No declaratives before `Sub Main()`** — `Dim`, `Const`, and any other
+  declarative statement cause a syntax error if placed between the macro name
+  header comment and `Sub Main()`. Declaratives may appear at module scope,
+  but only *after* `Sub Main()` (i.e. after its `End Sub`). The cleanest
+  pattern is to declare everything inside the `Sub`/`Function` that uses it.
+  See Section 9 for the full placement rule.
 
 ### Correct patterns
 
@@ -75,6 +81,33 @@ Format(aTime, "hh:mm")
 ' CORRECT - use FormatDateTime for dates, FormatTime helper for times
 FormatDateTime(aDate, 2)   ' 2 = vbShortDate
 FormatTime(aTime)          ' see FormatTime / PadTwo in section 7
+```
+
+```vb
+' WRONG — declarative before Sub Main() causes a syntax error
+' Macro: MyMacro
+Const olMailItem = 0      ' syntax error on this line
+Dim aRept                 ' syntax error on this line
+
+Sub Main()
+  ...
+End Sub
+
+' CORRECT — declare inside Sub Main (preferred) ...
+' Macro: MyMacro
+Sub Main()
+  Const olMailItem = 0
+  Dim aRept
+  ...
+End Sub
+
+' ... or at module scope *after* Sub Main() if truly shared between Subs
+' Macro: MyMacro
+Sub Main()
+  ...
+End Sub
+
+Dim aRept                 ' module-level — OK here, after Sub Main()
 ```
 
 ---
@@ -785,26 +818,81 @@ errors are reported by users who may not know which macro they were running.
 ' for a date range, provider group, and POS selection.
 ' -----------------------------------------------------------------------
 
-Dim aRept   ' module-level stored report
-
 Sub Main()
   ...
 End Sub
+
+Dim aRept   ' module-level stored report — declared AFTER Sub Main()
 ```
 
 The name comment must be **line 1** — not after a blank line, not after a `Dim`
 statement. Profile counts from the top of the file when truncating the error
 display, so anything pushed below line 1 may not appear.
 
+**Nothing may appear between the header comment and `Sub Main()` except more
+comments.** Declaratives (`Dim`, `Const`, etc.) placed there produce a syntax
+error. See Section 9 for full placement rules.
+
 ---
 
 ## 9. Variable Declaration
 
-- Place all module-level `Dim` statements **at the top of the module**, before
-  any `Sub` or `Function`.
-- Declare variables at the top of the `Sub`/`Function` in which they are used.
+### Placement rule
+
+**Nothing may appear between the macro name header and `Sub Main()` except
+comments.** `Dim`, `Const`, and any other declarative statement in that region
+cause a syntax error. The Profile VB parser only accepts declaratives at module
+scope *after* `Sub Main()` (i.e. after its `End Sub`).
+
+In order of preference:
+
+1. **Inside the `Sub`/`Function` that uses it** — the default. Applies to
+   locals, loop counters, and anything whose lifetime does not need to span
+   multiple routines.
+2. **At module scope after `Sub Main()`** — for state that genuinely must be
+   shared between routines (e.g. a module-level stored report object
+   referenced from several helper subs).
+
+```vb
+' WRONG — Const/Dim before Sub Main() is a syntax error
+' Macro: MyMacro
+Const cSomething = 0       ' syntax error
+Dim aSharedState           ' syntax error
+
+Sub Main()
+  ...
+End Sub
+```
+
+```vb
+' CORRECT — declare inside the Sub/Function (preferred)
+' Macro: MyMacro
+Sub Main()
+  Const cSomething = 0
+  Dim aLocalState
+  ...
+End Sub
+```
+
+```vb
+' CORRECT — module-level Dim placed after Sub Main() for genuinely shared state
+' Macro: MyMacro
+Sub Main()
+  Set aSharedState = SomeFactory
+  DoHelperWork
+End Sub
+
+Sub DoHelperWork
+  aSharedState.AddRow
+End Sub
+
+Dim aSharedState   ' module-level — OK here, after Sub Main()/other Subs
+```
+
+### Naming conventions
+
 - Use consistent prefixes: `a` for objects/arrays, `b` for booleans,
-  `c` for constants/strings, `i`/`j` for loop counters.
+  `c` for constants/string literals, `i`/`j` for loop counters.
 
 ---
 
