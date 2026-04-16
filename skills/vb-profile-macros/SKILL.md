@@ -324,6 +324,23 @@ Returns a string indicating the status of a slot:
 `aSlotStart` and `aSlotEnd` must carry the full date+time (not just the time fraction).
 Use `Profile.LoadProviderById` — NOT `Profile.LoadProvider` — when loading by integer ID.
 
+**IMPORTANT — floating point epsilon required in overlap test:**
+DateTime arithmetic using `/1440` introduces tiny floating point drift. Without an
+epsilon, an appointment ending at exactly 10:45 produces `aApptEnd` fractionally
+*greater* than the slot start of 10:45, causing the adjacent next slot to be falsely
+marked Booked. Always use `cEpsilon = 0.5 / 1440` (half a minute) in the overlap
+comparison to absorb this drift.
+
+```vb
+' WRONG — no epsilon; adjacent slot falsely matches due to floating point drift
+If aApptStart < aSlotEnd And aApptEnd > aSlotStart Then ...
+
+' CORRECT — epsilon absorbs /1440 floating point error at exact boundaries
+Dim cEpsilon
+cEpsilon = 0.5 / 1440   ' half a minute in DateTime units
+If aApptStart < (aSlotEnd - cEpsilon) And aApptEnd > (aSlotStart + cEpsilon) Then ...
+```
+
 ```vb
 Function IsSlotBooked(aProviderID, aPosID, aDate, aSlotStart, aSlotEnd)
   IsSlotBooked = ""
@@ -332,6 +349,8 @@ Function IsSlotBooked(aProviderID, aPosID, aDate, aSlotStart, aSlotEnd)
   Dim aAppts
   Set aAppts = aProvider.LoadAppointments(aDate, "")
   Dim k
+  Dim cEpsilon
+  cEpsilon = 0.5 / 1440   ' half a minute — absorbs /1440 floating point drift
   For k = 0 To aAppts.Count - 1
     Dim aAppt
     Set aAppt = aAppts.Item(k)
@@ -339,7 +358,8 @@ Function IsSlotBooked(aProviderID, aPosID, aDate, aSlotStart, aSlotEnd)
       Dim aApptStart, aApptEnd
       aApptStart = aAppt.BookTime
       aApptEnd   = aAppt.BookTime + (aAppt.Duration / 1440)
-      If aApptStart < aSlotEnd And aApptEnd > aSlotStart Then
+      ' Epsilon prevents adjacent appointments (end == start) from falsely matching
+      If aApptStart < (aSlotEnd - cEpsilon) And aApptEnd > (aSlotStart + cEpsilon) Then
         If aAppt.PatientId > 0 Then
           IsSlotBooked = "Booked"
         Else
