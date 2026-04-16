@@ -13,9 +13,6 @@
 '      executeGlobal sApptRept
 ' -----------------------------------------------------------------------
 
-Dim aRept          ' module-level stored report
-Dim aProgressBar   ' module-level progress bar (ISModalProcessDisplay)
-
 ' -----------------------------------------------------------------------
 ' Main — example entry point showing all parameters
 ' -----------------------------------------------------------------------
@@ -43,6 +40,14 @@ Sub Main()
       aApptDuration, _
       bIncludeBooked)
 End Sub
+
+' -----------------------------------------------------------------------
+' Module-level variables — must appear AFTER Sub Main()...End Sub.
+' Declaratives before Sub Main() cause a syntax error in the Profile
+' VB scripting environment.
+' -----------------------------------------------------------------------
+Dim aRept          ' module-level stored report
+Dim aProgressBar   ' module-level progress bar (ISModalProcessDisplay)
 
 ' -----------------------------------------------------------------------
 ' PadTwo / FormatTime helpers
@@ -400,12 +405,8 @@ Sub GenerateSlotReport(aStartDate, aEndDate, aApptTypeCodes, aProvGrpCodes, aPos
   End If
 
   ' --- Step 2: Process rules ---
-  ' The progress bar MaxValue was set to cTotalSteps (4) at initialisation.
-  ' For the rule loop we switch to rule-level granularity by updating the
-  ' caption on each rule so the user can see which provider is being processed,
-  ' while keeping Position advancing one tick per rule within step 2.
-  ' We re-initialise the bar here with aRules.Count as the new MaxValue so
-  ' the bar fills smoothly across the rule loop.
+  ' Re-initialise the bar with aRules.Count as MaxValue so it fills
+  ' smoothly across the rule loop — one tick per rule.
   Dim aRuleCount
   aRuleCount = aRules.Count
 
@@ -435,7 +436,7 @@ Sub GenerateSlotReport(aStartDate, aEndDate, aApptTypeCodes, aProvGrpCodes, aPos
     Dim aRule
     Set aRule = aRules.Item(i)
 
-    ' Advance progress bar — show provider name if resolvable
+    ' Advance progress bar — show provider name if already cached
     Dim sRuleCaption
     sRuleCaption = "Rule " & (i + 1) & " of " & aRuleCount
     If aRule.RuleType = 1 Then
