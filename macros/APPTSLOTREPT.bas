@@ -13,7 +13,8 @@
 '      executeGlobal sApptRept
 ' -----------------------------------------------------------------------
 
-Dim aRept   ' module-level stored report
+Dim aRept          ' module-level stored report
+Dim aProgressBar   ' module-level progress bar (ISModalProcessDisplay)
 
 ' -----------------------------------------------------------------------
 ' Main — example entry point showing all parameters
@@ -59,6 +60,23 @@ Function FormatTime(aTime)
   aTotalMins = CInt(Int((aTime - Int(aTime)) * 1440 + 0.5))
   FormatTime = PadTwo(aTotalMins \ 60) & ":" & PadTwo(aTotalMins Mod 60)
 End Function
+
+' -----------------------------------------------------------------------
+' DisplayProgressBar — creates or updates the progress bar.
+' Call with aStep = 0 to initialise; subsequent calls advance the bar.
+' aMax is the total number of steps (set on first call, ignored after).
+' aCaption describes the current step shown to the user.
+' -----------------------------------------------------------------------
+Sub DisplayProgressBar(aStep, aCaption, aMax)
+  If aStep = 0 Then
+    Set aProgressBar = Profile.CreateModalProcessDisplay(False)
+    aProgressBar.ProcessName = "Generating Appointment Slot Report"
+    aProgressBar.MaxValue    = aMax
+    aProgressBar.AllowCancel = True
+  End If
+  aProgressBar.Position = aStep
+  aProgressBar.Caption  = "Step " & (aStep + 1) & " of " & aMax & ": " & aCaption
+End Sub
 
 ' -----------------------------------------------------------------------
 ' GetDurationRange — converts an aApptDuration label into min/max minutes.
@@ -250,6 +268,15 @@ End Function
 ' -----------------------------------------------------------------------
 Sub GenerateSlotReport(aStartDate, aEndDate, aApptTypeCodes, aProvGrpCodes, aPosIDs, aApptDuration, bIncludeBooked)
 
+  ' Progress bar has 4 major steps:
+  '   0 — Resolving provider groups
+  '   1 — Loading appointment rules
+  '   2 — Processing rules (rule loop — longest step)
+  '   3 — Saving and displaying report
+  Dim cTotalSteps
+  cTotalSteps = 4
+  DisplayProgressBar 0, "Resolving provider groups", cTotalSteps
+
   ' --- Create stored report ---
   Set aRept = CreateStoredReportList("Available Slots")
   aRept.Caption = "Available Slots " & FormatDateTime(aStartDate, 2) & " to " & FormatDateTime(aEndDate, 2)
@@ -330,6 +357,15 @@ Sub GenerateSlotReport(aStartDate, aEndDate, aApptTypeCodes, aProvGrpCodes, aPos
     Next  'aToken
   End If
 
+  ' Check for cancel after provider group resolution
+  If aProgressBar.Cancelled Then
+    Profile.MsgBox "Report cancelled.", 64, "Slot Report"
+    Exit Sub
+  End If
+
+  ' --- Step 1: Load appointment rules from server ---
+  DisplayProgressBar 1, "Loading appointment rules", cTotalSteps
+
   ' --- Configure server-side rule filter ---
   Dim aFilter
   Set aFilter = Profile.CreateAppointmentRuleFilter
@@ -357,6 +393,29 @@ Sub GenerateSlotReport(aStartDate, aEndDate, aApptTypeCodes, aProvGrpCodes, aPos
   Dim aRules
   Set aRules = aFilter.Load
 
+  ' Check for cancel after rule load
+  If aProgressBar.Cancelled Then
+    Profile.MsgBox "Report cancelled.", 64, "Slot Report"
+    Exit Sub
+  End If
+
+  ' --- Step 2: Process rules ---
+  ' The progress bar MaxValue was set to cTotalSteps (4) at initialisation.
+  ' For the rule loop we switch to rule-level granularity by updating the
+  ' caption on each rule so the user can see which provider is being processed,
+  ' while keeping Position advancing one tick per rule within step 2.
+  ' We re-initialise the bar here with aRules.Count as the new MaxValue so
+  ' the bar fills smoothly across the rule loop.
+  Dim aRuleCount
+  aRuleCount = aRules.Count
+
+  Set aProgressBar = Profile.CreateModalProcessDisplay(False)
+  aProgressBar.ProcessName = "Generating Appointment Slot Report"
+  aProgressBar.MaxValue    = aRuleCount
+  aProgressBar.AllowCancel = True
+  aProgressBar.Position    = 0
+  aProgressBar.Caption     = "Processing " & aRuleCount & " appointment rules..."
+
   ' --- Cache provider FullName per ProviderID to avoid repeated loads ---
   Dim aProvNameDict
   Set aProvNameDict = CreateObject("Scripting.Dictionary")
@@ -365,9 +424,29 @@ Sub GenerateSlotReport(aStartDate, aEndDate, aApptTypeCodes, aProvGrpCodes, aPos
   Dim aRowNum
   aRowNum = -1
 
-  For i = 0 To aRules.Count - 1
+  For i = 0 To aRuleCount - 1
+
+    ' Check for cancel at the start of each rule
+    If aProgressBar.Cancelled Then
+      Profile.MsgBox "Report cancelled after processing " & i & " of " & aRuleCount & " rules.", 64, "Slot Report"
+      Exit Sub
+    End If
+
     Dim aRule
     Set aRule = aRules.Item(i)
+
+    ' Advance progress bar — show provider name if resolvable
+    Dim sRuleCaption
+    sRuleCaption = "Rule " & (i + 1) & " of " & aRuleCount
+    If aRule.RuleType = 1 Then
+      Dim sCaptionProvKey
+      sCaptionProvKey = CStr(aRule.ProviderID)
+      If aProvNameDict.Exists(sCaptionProvKey) Then
+        sRuleCaption = sRuleCaption & ": " & aProvNameDict(sCaptionProvKey)
+      End If
+    End If
+    aProgressBar.Position = i
+    aProgressBar.Caption  = sRuleCaption
 
     If aRule.RuleType = 1 Then   ' sartPersonal only
 
@@ -426,6 +505,9 @@ Sub GenerateSlotReport(aStartDate, aEndDate, aApptTypeCodes, aProvGrpCodes, aPos
               aProvFullName = aProvObj.FullName
               aProvNameDict.Add aProvKey, aProvFullName
             End If
+
+            ' Update caption now that we have the provider name
+            aProgressBar.Caption = "Rule " & (i + 1) & " of " & aRuleCount & ": " & aProvFullName
 
             ' --- Clamp date walk to intersection of report range and rule validity ---
             Dim aRuleFinish
@@ -491,6 +573,10 @@ Sub GenerateSlotReport(aStartDate, aEndDate, aApptTypeCodes, aProvGrpCodes, aPos
       End If  'bDurationMatch
     End If  'RuleType = 1
   Next  'i
+
+  ' --- Step 3: Save and display report ---
+  aProgressBar.Position = aRuleCount
+  aProgressBar.Caption  = "Saving report..."
 
   aRept.Save 0
   aRept.PrintIt
