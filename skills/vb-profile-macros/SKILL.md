@@ -769,7 +769,36 @@ keys to avoid collisions:
 
 ---
 
-## 8. Variable Declaration
+## 8. Macro Name Header — Required on First Line
+
+**ALWAYS place the macro name as a comment on the very first line of every macro.**
+
+When a runtime error occurs, Profile displays the first few lines of the macro
+source in the error dialog. Having the macro name on line 1 immediately identifies
+which macro failed — essential when multiple macros share similar code or when
+errors are reported by users who may not know which macro they were running.
+
+```vb
+' Macro: SlotAvailabilityReport
+' -----------------------------------------------------------------------
+' Slot Availability Report — generates available/booked slot list
+' for a date range, provider group, and POS selection.
+' -----------------------------------------------------------------------
+
+Dim aRept   ' module-level stored report
+
+Sub Main()
+  ...
+End Sub
+```
+
+The name comment must be **line 1** — not after a blank line, not after a `Dim`
+statement. Profile counts from the top of the file when truncating the error
+display, so anything pushed below line 1 may not appear.
+
+---
+
+## 9. Variable Declaration
 
 - Place all module-level `Dim` statements **at the top of the module**, before
   any `Sub` or `Function`.
@@ -779,7 +808,7 @@ keys to avoid collisions:
 
 ---
 
-## 9. Error Handling
+## 10. Error Handling
 
 Wrap all file I/O and Profile API calls in error handling:
 
@@ -795,7 +824,7 @@ On Error GoTo 0
 
 ---
 
-## 10. Source References
+## 11. Source References
 
 - COM scripting layer (rules):    `Profile/Common/Infrastructure/Scripting/USAppointmentRule.pas`
 - COM scripting layer (groups):   `Profile/Common/Infrastructure/Scripting/USProviderGroups.pas`
