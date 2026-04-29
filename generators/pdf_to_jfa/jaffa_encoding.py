@@ -1,19 +1,21 @@
 """
 Jaffa value encoding for JFA OBSV field values.
 
-Profile's TJaffaValueEncoding.Encode escapes characters that would otherwise
-break the comma-separated OBSV row format. From the prior sample analysis:
+JFA records are TAB-separated. Profile's TJaffaValueEncoding.Encode escapes
+characters that would otherwise break the row format:
 
-  - CR  (0x0D)  -> "\\0d"
-  - LF  (0x0A)  -> "\\0a"
-  - ","          -> "\\2c"
-  - "\\"         -> "\\5c"
+  - HT  (0x09, tab) -> "\\09"   (the field separator — must be escaped in values)
+  - CR  (0x0D)      -> "\\0d"
+  - LF  (0x0A)      -> "\\0a"
+  - "\\"            -> "\\5c"
   - all other control chars (< 0x20) -> "\\<two hex digits>"
 
+Commas are NOT escaped — they pass through unchanged, since tab is the field
+separator. This was a discovery during first-import testing: an earlier
+version of this module assumed comma-separation (escaping `,` as `\\2c`),
+which produced files Profile rejected with "incorrect format".
+
 The encoding uses a literal backslash followed by two lowercase hex digits.
-This is the format we observed in the sample DFM blob inside field [13] of the
-form-def (100502) row, where embedded CRLF appeared as the four-character
-sequence  \\0d\\0a .
 """
 
 def encode(value: str) -> str:
@@ -23,8 +25,8 @@ def encode(value: str) -> str:
         c = ord(ch)
         if ch == '\\':
             out.append('\\5c')
-        elif ch == ',':
-            out.append('\\2c')
+        elif ch == '\t':
+            out.append('\\09')
         elif ch == '\r':
             out.append('\\0d')
         elif ch == '\n':
@@ -56,10 +58,11 @@ def decode(value: str) -> str:
 
 if __name__ == '__main__':
     samples = [
-        "Hello, world",
-        "line one\r\nline two",
-        "back\\slash and , comma",
-        "tab\there",
+        "Hello, world",                # commas pass through
+        "line one\r\nline two",        # CRLF -> \0d\0a
+        "back\\slash and , comma",     # backslash escaped, comma not
+        "tab\there",                   # tab -> \09
+        "field1\tfield2",              # internal tab in a value
     ]
     for s in samples:
         enc = encode(s)
