@@ -7,6 +7,11 @@ Emits the three record types established in the prior sample analysis:
   LNVR (6 fields)   — line-version block declaring (OBSV v2, SHRS v2)
   OBSV (44 fields)  — observation rows; class code in field [2] is the type discriminator
 
+Field separator: TAB (0x09). Lines are CRLF-terminated. An earlier version of
+this writer used commas as the field separator, which produced files Profile
+rejected as "incorrect format"; that was the first concrete piece of feedback
+from real import testing.
+
 For this layout-only first pass we emit:
   - 1 HEAD line
   - 1 LNVR line
@@ -15,6 +20,15 @@ For this layout-only first pass we emit:
 
 Per scope, no per-control field rows (100511/100517/100519) yet. The form
 will import and render visually; the data side is added later.
+
+Open items still to confirm against a real sample JFA (these are best-guess
+positions/values until calibrated):
+  - Exact field positions in 100503 and 100502 rows. The screenshot of a
+    working sample suggested 100502 places concept-like tokens in [7] and [8]
+    (e.g. 'z..0K' and 'z..4O') with NM=...,FD=...,EEML=T living in [9].
+  - The system-parent token used in [8] (placeholder 'z..00' here).
+  - Whether NM= attributes inside a single field are comma-joined or use some
+    other separator within the field.
 """
 from __future__ import annotations
 from datetime import datetime
@@ -22,9 +36,14 @@ from .layout import FormLayout
 from .jaffa_encoding import encode as jaffa_encode
 
 
+# Field separator within a record. Values containing this character must be
+# escaped via jaffa_encoding (tab -> \09).
+SEP = '\t'
+
 # Open question from prior analysis: the 'zZ.1Bx'-style tokens in OBSV fields
-# [7] and [8]. From the sample we observed values like 'z..0K' and 'zZ.1BD'.
-# Their meaning hasn't been confirmed against source.
+# [7] and [8]. From a working-sample screenshot we observed values like
+# 'z..0K' and 'z..4O' in 100502, and 'zZ.1BD'/'zZ.1BE' in 100511 rows. Their
+# meaning hasn't been confirmed against source.
 SYSTEM_PARENT_TOKEN = 'z..00'   # placeholder, to confirm against sample
 NAMESPACE_MARKER = 'IH'
 
@@ -34,10 +53,10 @@ CLS_FORM_DEF      = '100502'    # The CDO form definition (carries DFM in [13])
 
 
 def _obsv_row(fields: list[str]) -> str:
-    """Build a single OBSV row from 44 fields, jaffa-encoded and comma-joined."""
+    """Build a single OBSV row from 44 fields, jaffa-encoded and tab-joined."""
     if len(fields) != 44:
         fields = list(fields) + [''] * (44 - len(fields))
-    return ','.join(jaffa_encode(f) for f in fields)
+    return SEP.join(jaffa_encode(f) for f in fields)
 
 
 def _build_head(now: datetime) -> str:
@@ -48,13 +67,13 @@ def _build_head(now: datetime) -> str:
         now.strftime('%H.%M'),
         'M', 'F', '', '', '', '', '',
     ]
-    return ','.join(jaffa_encode(f) for f in fields)
+    return SEP.join(jaffa_encode(f) for f in fields)
 
 
 def _build_lnvr() -> str:
     """The LNVR line: declares per-record-type versions."""
     fields = ['LNVR', '3', 'OBSV', '2', 'SHRS', '2']
-    return ','.join(jaffa_encode(f) for f in fields)
+    return SEP.join(jaffa_encode(f) for f in fields)
 
 
 def _build_accession_row(layout: FormLayout, accession_id: int) -> str:
@@ -90,8 +109,12 @@ def _build_form_def_row(layout: FormLayout, dfm_text: str) -> str:
 
     Field [3]  = form_def_id
     Field [7]  = form's concept code (e.g. 'z..UB')
-    Field [9]  = NM=, FD=, EEML=T attributes
+    Field [9]  = NM=, FD=, EEML=T attributes (comma-joined inside the field)
     Field [13] = the entire DFM, jaffa-encoded
+
+    The internal commas within the [9] NM-block are NOT field separators
+    (since fields are tab-separated); they are part of the value as Profile's
+    NM-attribute parser expects.
     """
     nm_parts = [
         f'NM={layout.concept_display_name}',
@@ -116,7 +139,7 @@ def _build_form_def_row(layout: FormLayout, dfm_text: str) -> str:
     ]
     while len(fields) < 44:
         fields.append('')
-    return ','.join(jaffa_encode(f) for f in fields)
+    return SEP.join(jaffa_encode(f) for f in fields)
 
 
 def write_jfa(layout: FormLayout, dfm_text: str,
@@ -126,8 +149,8 @@ def write_jfa(layout: FormLayout, dfm_text: str,
     """Build the full JFA file content.
 
     Returns:
-        The complete JFA file content as a string. Uses CRLF line endings,
-        matching Profile's writer.
+        The complete JFA file content as a string. Uses CRLF line endings
+        and tab-separated fields, matching Profile's writer.
     """
     if now is None:
         now = datetime.now()
