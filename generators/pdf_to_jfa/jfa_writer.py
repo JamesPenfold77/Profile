@@ -1,165 +1,142 @@
 """
 JFA file writer.
 
-Emits the three record types established in the prior sample analysis:
+Layout calibrated against the minimal blank-form sample (Form_Template_-_Form.jfa).
+The structure is:
 
-  HEAD (15 fields)  — file-wide header
-  LNVR (6 fields)   — line-version block declaring (OBSV v2, SHRS v2)
-  OBSV (44 fields)  — observation rows; class code in field [2] is the type discriminator
+  HEAD (15 fields)         tag, "3", "1", "OBSV", "CDO Observations",
+                           "Intrahealth", date, time,
+                           "M", "", "", "F", "", "", ""
+  LNVR (6 fields)          "LNVR", "3", "OBSV", "2", "SHRS", "2"
+  OBSV 100503 (44 fields)  context/tenancy row (NZDF) — verbatim from fixtures
+  OBSV 100502 (44 fields)  form definition; carries DFM in field [13]
 
-Field separator: TAB (0x09). Lines are CRLF-terminated. An earlier version of
-this writer used commas as the field separator, which produced files Profile
-rejected as "incorrect format"; that was the first concrete piece of feedback
-from real import testing.
+File-level: UTF-8 BOM, CRLF line endings, TAB field separator.
 
-For this layout-only first pass we emit:
-  - 1 HEAD line
-  - 1 LNVR line
-  - 2 x OBSV class 100503 (Accession + Provider context)
-  - 1 x OBSV class 100502 (the form definition, carrying the DFM in field [13])
-
-Per scope, no per-control field rows (100511/100517/100519) yet. The form
-will import and render visually; the data side is added later.
-
-Open items still to confirm against a real sample JFA (these are best-guess
-positions/values until calibrated):
-  - Exact field positions in 100503 and 100502 rows. The screenshot of a
-    working sample suggested 100502 places concept-like tokens in [7] and [8]
-    (e.g. 'z..0K' and 'z..4O') with NM=...,FD=...,EEML=T living in [9].
-  - The system-parent token used in [8] (placeholder 'z..00' here).
-  - Whether NM= attributes inside a single field are comma-joined or use some
-    other separator within the field.
+Per-control field rows (100511 / 100517 / 100519) are NOT emitted in this
+layout-only first pass.
 """
 from __future__ import annotations
 from datetime import datetime
 from .layout import FormLayout
 from .jaffa_encoding import encode as jaffa_encode
+from . import fixtures
 
 
-# Field separator within a record. Values containing this character must be
-# escaped via jaffa_encoding (tab -> \09).
 SEP = '\t'
-
-# Open question from prior analysis: the 'zZ.1Bx'-style tokens in OBSV fields
-# [7] and [8]. From a working-sample screenshot we observed values like
-# 'z..0K' and 'z..4O' in 100502, and 'zZ.1BD'/'zZ.1BE' in 100511 rows. Their
-# meaning hasn't been confirmed against source.
-SYSTEM_PARENT_TOKEN = 'z..00'   # placeholder, to confirm against sample
-NAMESPACE_MARKER = 'IH'
-
-# OBSV class codes (confirmed in prior analysis)
-CLS_HEADER_OBS    = '100503'    # Accession / Provider context rows
-CLS_FORM_DEF      = '100502'    # The CDO form definition (carries DFM in [13])
+BOM = '\ufeff'
 
 
-def _obsv_row(fields: list[str]) -> str:
-    """Build a single OBSV row from 44 fields, jaffa-encoded and tab-joined."""
-    if len(fields) != 44:
+# Form-def [7]/[8] concept-pair. The minimal sample uses 'z..UB'/'z..UC'
+# as the form concept and its paired "form definition" partner concept.
+DEFAULT_CONCEPT_PAIR_FOR_UB = ('z..UB', 'z..UC')
+
+
+def _obsv_row_44(fields: list[str]) -> str:
+    """Build a 44-field OBSV row, jaffa-encoded and tab-joined."""
+    if len(fields) < 44:
         fields = list(fields) + [''] * (44 - len(fields))
+    elif len(fields) > 44:
+        raise ValueError(f"OBSV row has {len(fields)} fields, max is 44")
     return SEP.join(jaffa_encode(f) for f in fields)
 
 
 def _build_head(now: datetime) -> str:
-    """The 15-field HEAD line."""
+    """The 15-field HEAD line, matching minimal-sample structure exactly."""
     fields = [
         'HEAD', '3', '1', 'OBSV', 'CDO Observations', 'Intrahealth',
         now.strftime('%d/%m/%Y'),
         now.strftime('%H.%M'),
-        'M', 'F', '', '', '', '', '',
+        'M', '', '', 'F', '', '', '',
     ]
     return SEP.join(jaffa_encode(f) for f in fields)
 
 
 def _build_lnvr() -> str:
-    """The LNVR line: declares per-record-type versions."""
+    """The 6-field LNVR line."""
     fields = ['LNVR', '3', 'OBSV', '2', 'SHRS', '2']
     return SEP.join(jaffa_encode(f) for f in fields)
 
 
-def _build_accession_row(layout: FormLayout, accession_id: int) -> str:
-    """First 100503 row: the Accession context."""
-    nm = f'NM={layout.concept_display_name}'
-    fields = ['OBSV', '2', CLS_HEADER_OBS,
-              str(accession_id),
-              '',
-              '0',
-              NAMESPACE_MARKER,
-              SYSTEM_PARENT_TOKEN,
-              '',
-              nm]
-    return _obsv_row(fields)
+def _format_nm_field(name: str, fd_id: str) -> str:
+    """Build the NM=,EEML=T,FD=... field [9] for the form-def row.
 
-
-def _build_provider_row(layout: FormLayout, provider_id: int, accession_id: int) -> str:
-    """Second 100503 row: the Provider context, references the Accession."""
-    nm = 'NM=Provider'
-    fields = ['OBSV', '2', CLS_HEADER_OBS,
-              str(provider_id),
-              str(accession_id),
-              '0',
-              NAMESPACE_MARKER,
-              SYSTEM_PARENT_TOKEN,
-              '',
-              nm]
-    return _obsv_row(fields)
-
-
-def _build_form_def_row(layout: FormLayout, dfm_text: str) -> str:
-    """The 100502 row carrying the form definition.
-
-    Field [3]  = form_def_id
-    Field [7]  = form's concept code (e.g. 'z..UB')
-    Field [9]  = NM=, FD=, EEML=T attributes (comma-joined inside the field)
-    Field [13] = the entire DFM, jaffa-encoded
-
-    The internal commas within the [9] NM-block are NOT field separators
-    (since fields are tab-separated); they are part of the value as Profile's
-    NM-attribute parser expects.
+    NM is wrapped in literal double-quotes if the name contains spaces
+    (matching Consent for Health Care sample's "NM=Consent for Health Care").
+    Without spaces, no quotes (matching minimal's NM=Form,EEML=T,FD=4474196).
     """
-    nm_parts = [
-        f'NM={layout.concept_display_name}',
-        f'FD={layout.form_def_id}',
-        'EEML=T',
-    ]
-    nm = ','.join(nm_parts)
-    fields = [
-        'OBSV', '2', CLS_FORM_DEF,
-        str(layout.form_def_id),
-        '',                              # [4] form-def has no parent
-        '0',                             # [5] sequence
-        NAMESPACE_MARKER,                # [6]
-        layout.concept_code,             # [7] form concept code
-        SYSTEM_PARENT_TOKEN,             # [8]
-        nm,                              # [9] NM=,FD=,EEML=T
-        '',                              # [10]
-        '',                              # [11]
-        '',                              # [12]
-        dfm_text,                        # [13] DFM
-        '',                              # [14]
-    ]
-    while len(fields) < 44:
-        fields.append('')
-    return SEP.join(jaffa_encode(f) for f in fields)
+    if ' ' in name:
+        nm_part = f'"NM={name}"'
+    else:
+        nm_part = f'NM={name}'
+    return f'{nm_part},EEML=T,FD={fd_id}'
+
+
+def _build_form_def_row(layout: FormLayout, dfm_text: str,
+                        context_row_id: str,
+                        concept_pair: tuple[str, str]) -> str:
+    """Build the OBSV 100502 form-definition row.
+
+    Matches minimal-sample positions exactly:
+      [3]  = form_def_id (synthetic; Profile remaps on import)
+      [5]  = '0'
+      [6]  = 'IH'
+      [7]  = concept_pair[0]   (the form's concept code)
+      [8]  = concept_pair[1]   (paired partner concept)
+      [9]  = NM=...,EEML=T,FD=<context_row_id>
+      [11] = '2147483647'
+      [12] = '0'
+      [13] = DFM (jaffa-encoded by _obsv_row_44)
+      [34] = 'F'
+      [35] = 'F'
+      [39] = 'EN'
+    """
+    fields = [''] * 44
+    fields[0] = 'OBSV'
+    fields[1] = '2'
+    fields[2] = '100502'
+    fields[3] = str(layout.form_def_id)
+    fields[5] = '0'
+    fields[6] = 'IH'
+    fields[7] = concept_pair[0]
+    fields[8] = concept_pair[1]
+    fields[9] = _format_nm_field(layout.concept_display_name, context_row_id)
+    fields[11] = '2147483647'
+    fields[12] = '0'
+    fields[13] = dfm_text
+    fields[34] = 'F'
+    fields[35] = 'F'
+    fields[39] = 'EN'
+    return _obsv_row_44(fields)
 
 
 def write_jfa(layout: FormLayout, dfm_text: str,
-              accession_id: int = 90000001,
-              provider_id: int = 90000002,
-              now: datetime | None = None) -> str:
-    """Build the full JFA file content.
+              now: datetime | None = None,
+              concept_pair: tuple[str, str] | None = None) -> str:
+    """Build a complete JFA file as a string.
 
     Returns:
-        The complete JFA file content as a string. Uses CRLF line endings
-        and tab-separated fields, matching Profile's writer.
+        UTF-8 string starting with BOM, CRLF-terminated lines, tab-separated
+        fields. Caller writes with encoding='utf-8' (not utf-8-sig) since the
+        BOM is included literally in the returned string.
     """
     if now is None:
         now = datetime.now()
 
-    lines = [
-        _build_head(now),
-        _build_lnvr(),
-        _build_accession_row(layout, accession_id),
-        _build_provider_row(layout, provider_id, accession_id),
-        _build_form_def_row(layout, dfm_text),
-    ]
-    return '\r\n'.join(lines) + '\r\n'
+    if concept_pair is None:
+        if layout.concept_code == DEFAULT_CONCEPT_PAIR_FOR_UB[0]:
+            concept_pair = DEFAULT_CONCEPT_PAIR_FOR_UB
+        else:
+            concept_pair = (layout.concept_code, layout.concept_code)
+
+    head = _build_head(now)
+    lnvr = _build_lnvr()
+    context_row = fixtures.NZDF_CONTEXT_ROW
+    form_def = _build_form_def_row(
+        layout, dfm_text,
+        context_row_id=fixtures.NZDF_CONTEXT_ROW_ID,
+        concept_pair=concept_pair,
+    )
+
+    lines = [head, lnvr, context_row, form_def]
+    return BOM + '\r\n'.join(lines) + '\r\n'
