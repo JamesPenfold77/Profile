@@ -4,22 +4,17 @@ Jaffa value encoding for JFA OBSV field values.
 JFA records are TAB-separated. Profile's TJaffaValueEncoding.Encode escapes
 characters that would otherwise break the row format:
 
-  - HT  (0x09, tab) -> "\\09"   (the field separator — must be escaped in values)
+  - HT  (0x09, tab) -> "\\09"
   - CR  (0x0D)      -> "\\0d"
   - LF  (0x0A)      -> "\\0a"
   - "\\"            -> "\\5c"
   - all other control chars (< 0x20) -> "\\<two hex digits>"
 
-Commas are NOT escaped — they pass through unchanged, since tab is the field
-separator. This was a discovery during first-import testing: an earlier
-version of this module assumed comma-separation (escaping `,` as `\\2c`),
-which produced files Profile rejected with "incorrect format".
-
-The encoding uses a literal backslash followed by two lowercase hex digits.
+Commas pass through unchanged (tab is the field separator).
 """
 
 def encode(value: str) -> str:
-    """Apply Jaffa value encoding to a string for embedding in an OBSV field."""
+    """Apply Jaffa value encoding to a string."""
     out = []
     for ch in value:
         c = ord(ch)
@@ -39,7 +34,7 @@ def encode(value: str) -> str:
 
 
 def decode(value: str) -> str:
-    """Reverse Jaffa encoding (useful for round-trip testing against samples)."""
+    """Reverse Jaffa encoding."""
     out = []
     i = 0
     while i < len(value):
@@ -54,18 +49,3 @@ def decode(value: str) -> str:
         out.append(ch)
         i += 1
     return ''.join(out)
-
-
-if __name__ == '__main__':
-    samples = [
-        "Hello, world",                # commas pass through
-        "line one\r\nline two",        # CRLF -> \0d\0a
-        "back\\slash and , comma",     # backslash escaped, comma not
-        "tab\there",                   # tab -> \09
-        "field1\tfield2",              # internal tab in a value
-    ]
-    for s in samples:
-        enc = encode(s)
-        dec = decode(enc)
-        ok = dec == s
-        print(f"{'OK' if ok else 'FAIL'}: {s!r}  ->  {enc!r}  ->  {dec!r}")
