@@ -1,0 +1,2085 @@
+'-------  SWREPORT
+' Version 2.14 
+' Only issue msgbox error "Case type not found" if running client side
+'-----------------------------------------------------------------------------
+' Version 2.13
+' Author: James Penfold - 22/04/2026
+' Performance changes:
+'  - Memoise GetPatientGenderKey / GetPatientEthnicityKey results per
+'    patient (gGenderCache, gEthCache). The previous code made 1..7 COM
+'    property reads per call; now each patient's bucket keys are computed
+'    once on first use and reused everywhere.
+'  - GetCasePatientService now uses LoadPatientCached (was reloading the
+'    patient on every invocation, bypassing the existing patient cache).
+'  - In CollectStats, hoist GetCaseServicePOSCode and GetCasePatientService
+'    calls out of the POS and MilService column loops. Previously each
+'    case triggered a Profile.LoadCaseServices DB query per POS column
+'    (O(cases * columns) DB hits); now computed once per case.
+'------------------------------------------------------------------------------
+' Version 2.12
+' Author: James Penfold - 22/04/2026
+' Reporting changes:
+'  - Add Demographic Data section after 'Number of Per Presenting':
+'    7 rows (3 Gender + 4 Ethnicity) with unique-patient counts per column.
+'    Self-crossing cells (e.g. Male row x Male column) are blank.
+'    Patient population is the main report's encounters (matches Total Number
+'    Of Individuals row).
+'  - New helper BuildDemographicLines + gDemoLines/gDemoUniq globals.
+'------------------------------------------------------------------------------
+' Version 2.11
+' Author: James Penfold - 22/04/2026
+' Reporting changes:
+'  - Add 7 new column groupings: Gender (Male, Female, Gender Diverse) and
+'    Ethnicity (NZ Maori, Pakeha/NZ European, Pasifika, Other).
+'    Ethnicity uses MoH-prioritised single-bucket assignment across the
+'    patient's up-to-6 ethnicity codes: Maori(21) > Pasifika(30-37) >
+'    Other(any other code including 10, 12, 40-44) > Pakeha(11).
+'  - New helpers GetPatientGenderKey and GetPatientEthnicityKey.
+'  - Emit a group-header row as the first data row with labels over the
+'    first column of each grouping: Locations/Providers/Service/Gender/Ethnicity.
+'  - Gender/Ethnicity counts populated across Cases, Appointments, Encounters,
+'    Number of Per Presenting, Top 5 and Monitored sections.
+'------------------------------------------------------------------------------
+' Version 2.10
+' Author: James Penfold - 22/04/2026
+' Reporting changes:
+'  - Cases section now covers both 'Social' and 'SWHSB' case types, producing
+'    six rows (New/Open/Closed for each) labelled "- Social Work" and
+'    "- Social Work (HSB)" respectively.
+'  - Extract LoadCaseTypeCases helper for reuse across case types.
+'------------------------------------------------------------------------------
+' Version 2.9
+' Author: James Penfold - 22/04/2026
+' Reporting changes:
+'  - Open Cases figures now reflect cases open as at the report end date,
+'    not as at the time the report is run.
+'  - Remove "Non-Specified" rows from Encounters and Per Presenting sections.
+'  - Remove "Total not linked to a case" row from Encounters section.
+'  - Swap appointment rows so Client Contact precedes Client Related Consult.
+'------------------------------------------------------------------------------
+' Version 2.8
+' Author: James Penfold - 22/04/2026
+' Code review fixes:
+'  - Remove dead ExtractDiagCodeDescForTop function.
+'  - Add LoadPatientCached to avoid repeated Profile.LoadPatient calls.
+'  - Add inline error handling in LoadSWEncounters and CalcTopMonTotals.
+'  - Replace O(P) provider-code scans with dictionary lookups.
+'  - Tidy unused globals and whitespace in user-visible constants.
+'------------------------------------------------------------------------------
+' Version 2.7
+' Author: Mark James - 10/07/2025
+' Open Cases report looks at open cases at time of running.
+' Use modal msgbox calls.
+'------------------------------------------------------------------------------
+' Version 2.6
+' Author: Mark James - 24/03/2025
+' Case-insensitive check when excluding test patients.
+' Correct patient count count for Top 5 diagnoses and monitored totals.
+'------------------------------------------------------------------------------
+' Version 2.5
+' Author: Mark James - 04/02/2025
+' Correct end-date errors and appointment selection descriptions.
+' Exclude generic SOCIALWORK and MHP encounters from top-5 lists.
+' [Subsequent changes by Karen Hawkes:  wording changes and exclude MHP codes]
+'------------------------------------------------------------------------------
+' Version 2.4
+' Author: Mark James - 01/11/2024
+' In Appointment Summary and Highest Presenting Reasons, fix several logic errors.
+' Sort list of providers alphabetically.
+'------------------------------------------------------------------------------
+' Version 2.3
+' Author: Karen Hawkes - 12/08/2024
+' Updated monitored codes - SOC prefix updated to WLB to match wellbeing code updates.
+'------------------------------------------------------------------------------
+' Version 2.2
+' Author: Intrahealth - 12/03/2024
+' Description: Fixing POS codes and internal bug in InternalLine.Assign procedure
+'------------------------------------------------------------------------------
+' Version 2.1
+' Author: Intrahealth - 13/2/2024
+' Description: Fixing functions prefix
+' Fixing dates calculation
+'------------------------------------------------------------------------------
+' Version 2.0
+' Author: Intrahealth - 6/12/2023
+' Description:  Use Case Subreferrals to determine POS
+' Optimise Loading Encounter 
+'------------------------------------------------------------------------------
+' Version 1.0
+' Author: Alexandr Ianotchkin, Intrahealth - 2/8/2023
+' Description:
+' This report contains a  breakdown of Social Worker data so that 
+' the National Manager Social Services can analyse the data to provide reporting to various stakeholders.
+' Refer to the following specification For more details:
+'    Social Work Functionality Improvements and Fixes 
+'    Defence Medical Information System
+'------------------------------------------------------------------------------
+
+Sub Main()                                                              
+'''''' These are set only if running the macro manually.
+  sFrom = #2026-Apr-20#    'Set Period Start here
+  sTo = #2026-Apr-25#  ' End date is non-inclusive in filters, but this will be fixed up later
+''
+  ' If running as a scheduled task, set start/end dates to be the most recent full quarter.
+  ' (If via Special > Run Macro, user will supply these dates in the parameters.)
+  If GetRunningApplicationType = 0 then 'server
+    aQuarter = datepart("q", now) - 1 
+    theMonth = array(10,1,4,7)(aQuarter) 'start previous quarter
+    aYear = datepart("yyyy", now)
+    if aQuarter = 0 then: aYear = aYear - 1
+    aStartDate = Dateserial(cstr(aYear), theMonth, "01")
+    sFrom = ConvertDate(aStartDate)  
+    aEndDate = DateAdd("m", 3, aStartDate) - 1
+    sTo = ConvertDate(aEndDate)  
+  End if
+ 
+  RunSWReport(sFrom & "|" & sTo)
+end Sub
+
+Sub RunSWReport(aParams)                                '======================= 
+  aMacroData = Split(aParams, "|")
+  aStartDate = DateValue(aMacroData(0))
+  aEndDate = DateValue(aMacroData(1)) + 1  ' Remembering that filters use non-inclusive end dates
+
+  aReportName = "Social Worker Report (V2.13) For period " & ConvertDate(aStartDate) & " through " & ConvertDate(aEndDate - 1)
+  set aRept = Profile.CreateStoredReportList(aReportName)
+  aRept.AddHeader aReportName
+  aRept.AddHeader "Report begins at " & Now()
+
+  ' Hard-code several military services in a useful order; more might be appended later.
+  Set aMilServiceList = CreateObject("Scripting.Dictionary")
+  for i = LBound(arrMilServices) to UBound(arrMilServices)
+    aMilServiceList.Add arrMilServices(i), 0
+  next
+
+  ' Build a list of Social Worker providers and sort alphabetically by surname
+  Set aSWProviders = CreateObject("Scripting.Dictionary")
+  ReadProvidersbySpeciality "Social Worker"  
+
+  ' Patient cache to avoid repeated Profile.LoadPatient calls for the same patient
+  Set gPatientCache = CreateObject("Scripting.Dictionary")
+  ' Demographic key caches: each entry is computed once per patient
+  Set gGenderCache = CreateObject("Scripting.Dictionary")
+  Set gEthCache    = CreateObject("Scripting.Dictionary")
+
+  ' Virtual report (essentially a two-dimensional array for rows and columns)
+  ' It's a class wrapper for a dictionary of arrays.
+  Set vReport = New VirtualReport
+  vReport.Init()
+
+  ' One InternalLines object per reporting section; section totals included
+  set gIndLines = New InternalLines    ' Summary of cases
+  gIndLines.Init()
+  set gAppLines = New InternalLines    ' Appointment summary
+  gAppLines.Init()
+  set gEncLines = New InternalLines    ' Overall number of encounters per diagnosis
+  gEncLines.Init()
+  set gPerLines = New InternalLines    ' Overall number of patients per diagnosis
+  gPerLines.Init()
+  set gTopEncLines = New InternalLines ' Top 5 encounters per diagnosis
+  gTopEncLines.Init()
+  set gTopPerLines = New InternalLines ' Top 5 patients per diagnosis
+  gTopPerLines.Init()
+  set gMonEncLines = New InternalLines ' Encounters per monitored diagnosis
+  gMonEncLines.Init()
+  set gMonPerLines = New InternalLines ' Patients per monitored diagnosis
+  gMonPerLines.Init()
+ 
+   '=== Generate Report Data
+   
+  set aEncFilter = Profile.CreateEncounterFilter
+  aEncFilter.EncounterDateFrom = aStartDate
+  aEncFilter.EncounterDateTo = aEndDate
+  
+  ' gEncounters is a list of Social Worker encounter objects during the time period
+  set gEncounters = SocialWorkerEncounters(aEncFilter)
+  if bLogDetail then:  aRept.AddHeader "Finished loading encounters at " & Now()
+
+  ' Build three lists of Social Work cases:  open, closed, and current
+  Call LoadSWCases   ' Can also add to list of military services
+  if bLogDetail then:  aRept.AddHeader "Finished loading cases at " & Now()
+ 
+  ' In appointment summary (InternalLines object), add its member lines
+  gAppLines.Add cAppTotalClientContact, dAppTotalClientContact
+  gAppLines.Add cAppTotalClientRelated, dAppTotalClientRelated
+  gAppLines.Add cNumberConsultSocialWork, dNumberConsultSocialWork
+  gAppLines.Add cNumberConsultSocialWorkPer, dNumberConsultSocialWorkPer
+  gAppLines.Add cNumberTeleconSocialWork, dNumberTeleconSocialWork
+  gAppLines.Add cNumberTeleconSocialWorkPer, dNumberTeleconSocialWorkPer
+
+  gAppLines.Add cAppTotalDNA, dAppTotalDNA
+  gAppLines.Add cAppCorrespondence, dAppCorrespondence
+  gAppLines.Add cAppSTALiaison, dAppSTALiaison
+  gAppLines.Add cAppCaseManagement, dAppCaseManagement
+  gAppLines.Add cAppGenAdm, dAppGenAdm
+  gAppLines.Add cAppMeeting, dAppMeeting
+  gAppLines.Add cAppPreparation, dAppPreparation
+  gAppLines.Add cAppPresentation, dAppPresentation
+
+  Set gPerUniq = CreateObject("Scripting.Dictionary")   ' For appts
+  Call LoadAppts       ' can also add new military services
+  if bLogDetail then:  aRept.AddHeader "Finished loading appointments at " & Now()
+
+  ' In report sections for encounters per diagnosis and patients per diagnosis,
+  ' create InternalLine objects for each diagnosis and for totals
+  Set gPerUniq = CreateObject("Scripting.Dictionary")   ' For encounters
+  Call LoadSWEncounters  ' can also add new military services
+
+  ' Fill in InternalLine objects for top 5 encounters and patients sections, 
+  ' and for monitored diagnoses
+  Call FindTopLines
+  Call CalcTopMonTotals
+  if bLogDetail then:  aRept.AddHeader "Finished processing encounters at " & Now()
+
+  ' Build the columns of the virtual report
+  CreateVirtualReportItems array("Type","Data details",cTotal)
+  CreateVirtualReportItems aPosLocations 
+  CreateVirtualReportItems aSWProviders 
+  CreateVirtualReportItems aMilServiceList.Keys
+  CreateVirtualReportItems aGenderHeaders
+  CreateVirtualReportItems aEthnicityHeaders
+ 
+  ' Social Work case type
+  GenerateForCases NewSWCasesList, "New Cases - Social Work", "New 'Social Work' cases created by a user with the role of SW within the period the report is being run for."
+  GenerateForCases OpenSWCasesList, "All Open Cases - Social Work", "Total number of Open 'Social Work' Cases (where SW is the Lead Carer) as at " & ConvertDate(aEndDate - 1)
+  GenerateForCases ClosedSWCasesList, "Cases Closed - Social Work", "'Social Work' Cases Closed by a user with the role of SW within the period the report is being run for."
+  ' Social Work (HSB) case type
+  GenerateForCases NewHSBCasesList, "New Cases - Social Work (HSB)", "New 'Social Work (HSB)' cases created by a user with the role of SW within the period the report is being run for."
+  GenerateForCases OpenHSBCasesList, "All Open Cases - Social Work (HSB)", "Total number of Open 'Social Work (HSB)' Cases (where SW is the Lead Carer) as at " & ConvertDate(aEndDate - 1)
+  GenerateForCases ClosedHSBCasesList, "Cases Closed - Social Work (HSB)", "'Social Work (HSB)' Cases Closed by a user with the role of SW within the period the report is being run for."
+  
+  For i = 0 To gAppLines.ItemCount - 1
+    Set aAppLine = gAppLines.GetItem(i)
+    vReport.AddLine
+    vReport.CurrentItem(cType) = aAppLine.Code
+    vReport.CurrentItem(cDataDetails) = aAppLine.Description
+    vReport.CurrentItem(cTotal) = 0
+    CollectStatsApp(aAppLine)
+  Next 
+  
+  gEncLines.SortByDesc(1) ' skip the single total record
+  If gEncLines.ItemCount > 1 then             ' Encounters
+    For i = 0 To gEncLines.ItemCount - 2 
+      AddLineToReport gEncLines.GetSortedItem(i)
+    Next 
+  End if
+  AddLineToReport gEncLines.GetItem(0)       ' Total
+
+  gPerLines.SortByDesc(2) ' skip 2 total records
+  If gPerLines.ItemCount > 2 then                ' Encounters of Per Presenting 
+    For i = 0 To gPerLines.ItemCount - 3  
+      AddLineToReport gPerLines.GetSortedItem(i)
+    Next 
+  end If 
+  For i = 0 To 1 
+    AddLineToReport gPerLines.GetItem(i)      '  Total, Total unique
+  Next 
+
+  ' Demographic Data (cross-tab of unique patients per column grouping)
+  BuildDemographicLines
+  For i = 0 To gDemoLines.ItemCount - 1
+    AddLineToReport gDemoLines.GetItem(i)
+  Next
+
+  ' Highest Presenting Reasons and Monitoring Codes
+
+  For i = 0 To gTopEncLines.ItemCount - 1
+    AddLineToReport gTopEncLines.GetItem(i)
+  Next 
+
+  For i = 0 To gMonEncLines.ItemCount - 1 
+    AddLineToReport gMonEncLines.GetItem(i)
+  Next 
+
+  For i = 1 To gTopPerLines.ItemCount - 1  
+    AddLineToReportMerged gTopPerLines.GetItem(i)
+  Next 
+  AddLineToReport gTopPerLines.GetItem(0) 'Total
+
+  For i = 1 To gMonPerLines.ItemCount - 1 
+    AddLineToReportMerged gMonPerLines.GetItem(i)
+  Next 
+  AddLineToReport gMonPerLines.GetItem(0) 'Total
+
+'       Exclude empty providers
+  For k = aSWProviders.count - 1 to 0 step -1
+    key = aSWProviders.Keys()(k)
+    If vReport.IsEmptyArray(key) then
+      vReport.DeleteItem(key)
+      aSWProviders.Remove key
+    End if
+  Next  ' k 
+  if bLogDetail then:  aRept.AddHeader "Finished virtual report at " & Now()
+
+  CreateReportColumn array("Type","Data details"), cStringType
+  CreateReportColumn array(cTotal), cIntegerType
+  CreateReportColumn aPosLocations, cIntegerType 
+  CreateReportColumn aSWProviders, cIntegerType 
+  CreateReportColumn aMilServiceList.Keys, cIntegerType
+  CreateReportColumn aGenderHeaders, cIntegerType
+  CreateReportColumn aEthnicityHeaders, cIntegerType
+
+  gCurrentLine = 0        ' Global index For CopyLineFromVirtualReport
+
+  ' Group-header row with labels over the first column of each grouping
+  Call AddGroupHeaderRow
+
+  AddHeaderToReport "Cases"
+  CopyLineFromVirtualReport(False)       ' New Cases - Social Work
+  CopyLineFromVirtualReport(False)       ' All Open Cases - Social Work
+  CopyLineFromVirtualReport(False)       ' Cases Closed - Social Work
+  CopyLineFromVirtualReport(False)       ' New Cases - Social Work (HSB)
+  CopyLineFromVirtualReport(False)       ' All Open Cases - Social Work (HSB)
+  CopyLineFromVirtualReport(False)       ' Cases Closed - Social Work (HSB)
+  
+  AddHeaderToReport "Appointment Summary"
+  For i = 0 To gAppLines.ItemCount - 1
+    Set aAppLine = gAppLines.GetItem(i)
+    CopyLineFromVirtualReport(mid(aAppLine.Code, 1, 9) <> "Number of")  'convert to hours?
+  Next 
+
+  AddHeaderToReport "Number of Encounters"
+  For i = 0 To gEncLines.ItemCount - 1
+    CopyLineFromVirtualReport(False)
+  Next 
+	 	
+  AddHeaderToReport "Number of Per Presenting"
+  For i = 0 To gPerLines.ItemCount - 1
+    CopyLineFromVirtualReport(False)
+  Next 
+
+  AddHeaderToReport "Demographic data"
+  For i = 0 To gDemoLines.ItemCount - 1
+    CopyLineFromVirtualReport(False)
+  Next
+    
+  AddHeaderToReport "Highest Presenting Reasons and Monitoring Codes"
+  AddHeaderToReport "Number of Encounters"
+  For i = 0 To gTopEncLines.ItemCount - 1
+    CopyLineFromVirtualReport(False)
+  Next 
+	 	
+  AddHeaderToReport "Monitoring codes"
+  For i = 0 To gMonEncLines.ItemCount - 1
+    CopyLineFromVirtualReport(False)
+  Next 
+	 	
+  AddHeaderToReport "Number of Per Presenting"
+  For i = 0 To gTopPerLines.ItemCount - 1
+    CopyLineFromVirtualReport(False)
+  Next 
+
+  AddHeaderToReport "Monitoring codes"
+  For i = 0 To gMonPerLines.ItemCount - 1
+    CopyLineFromVirtualReport(False)
+  Next 
+
+  aRept.AddHeader "Execution complete at " & Now()
+  aRept.Save
+  If GetRunningApplicationType <> 0 then
+    Profile.Msgbox aReportName & " is ready"
+    If bDebug then: Profile.Msgbox "iDebug = " & iDebug
+  End if
+
+end Sub
+                                                          
+'============ Globals==============  
+   
+dim aStartDate, aEndDate
+dim NewSWCasesList, OpenSWCasesList, ClosedSWCasesList, aMilServiceList, gEncounters
+dim NewHSBCasesList, OpenHSBCasesList, ClosedHSBCasesList
+dim aSWProviders, gCurrentLine, aRept, vReport
+dim gEncLines, gAppLines, gPerLines,  gIndLines, gTopEncLines, gTopPerLines, gMonEncLines, gMonPerLines, gTotalMonPerLine 
+dim gDemoLines, gDemoUniq  ' Demographic Data cross-tab section
+dim gTotalEncCol, gTotalPerCol, gTotalPerIndCol, gPerUniq
+dim gTotalEncLine, gTotalPerLine, gTotalPerIndLine, gTotalTopPerLine
+dim gPatientCache
+dim gGenderCache, gEthCache  ' Memoise computed gender/ethnicity keys per patient ID
+dim arrKeys(4)  ' top codes
+
+iDebug = 0
+bDebug = false
+bLogDetail = false
+ 
+Const cStringType = 1
+Const cIntegerType = 0
+Const cRedColour = "<c>1381887</c>"
+Const cGrayColour = "<c>13882323</c>"
+Const cTotalEncounters = "Total Number of Encounters"
+Const cTotalEncountersUnlinked = "Total not linked to a case"
+Const cTotalNumberOfPer = "Total Number Of Per"
+Const cTotalNumberOfIndividuals = "Total Number Of Individuals"
+Const cTotal = "Total (Location Columns)"
+Const cType = "Type"
+Const cDataDetails = "Data details"
+
+Const cAppTotalClientRelated = "Total duration Client related consult"
+Const cAppTotalClientContact = "Total duration Client Contact"
+Const cNumberConsultSocialWork = "Number of Appt CONSULT - Social Work"
+Const cNumberConsultSocialWorkPer = "Number of Per CONSULT - Social Work"
+Const cNumberTeleconSocialWork = "Number of Appt TELECON - Social Work"
+Const cNumberTeleconSocialWorkPer = "Number of Per TELECON - Social Work"
+
+Const cAppTotalDNA = "Total hours of appointments - DNA"
+Const cAppCorrespondence = "Correspondence about Case"
+Const cAppSTALiaison = "STA Liaison"
+Const cAppCaseManagement = "Case Management - admin and non-contact time"
+Const cAppGenAdm = "General Administration"
+Const cAppMeeting = "Meetings"
+Const cAppPreparation = "Preparation for programme"
+Const cAppPresentation = "Program / Presentation delivery"
+Const cNonSpecified = "Non-Specified"
+Const cTotalOfTopCodes = "Total individuals for highest five codes"
+Const cTotalOfSuicidalCodes = "Total individuals with Suicidal codes"
+
+Const dTotalEncounters = "Sum of all encounters for the column headers"
+Const dTotalEncountersUnlinked = "Total number of encounters not linked to a case"
+Const dTotalNumberOfPer = "Total Number of Per for Encounter Reasons"
+Const dTotalNumberOfIndividuals = "Singular count of unique Service Numbers"
+
+Const dAppTotalClientRelated = "Total duration of Appts: Consult (Command Meeting,Health Provider Liaison) - Appt Status is Seen, Invoiced, Closed"
+Const dAppTotalClientContact = "Total duration of Appts: Consult (Social Work); Telephone Consult(Social Work) - Appt Status is Seen, Invoiced, Closed, and client is linked"
+Const dNumberConsultSocialWork = "Number of Appts: Consult (Social Work) - Appt Status is Seen, Invoiced or Closed, and client is linked"
+Const dNumberConsultSocialWorkPer = "Number of Per where Appt is Consult (Social Work) - Appt Status is Seen, Invoiced or Closed, and client  is linked"
+Const dNumberTeleconSocialWork = "Number of Appts: Telephone Consult (Social Work) Appt Status is Seen, Invoiced or Closed, and client is linked"
+Const dNumberTeleconSocialWorkPer = "Number of Per where Appt is Consult (Social Work) Appt Status is Seen, Invoiced or Closed, and client is linked"
+
+Const dAppTotalDNA = "Total duration of Appts: Consult(Social Work); Telephone Consult(Social Work) - Appt Status is DNA, and client is linked"
+Const dAppCorrespondence = "Total duration of Appts: Telephone Consult(Patient referrals/follow up), Meeting(Patient referrals/follow up, Health Provider Liaison, Command Liaison, Peer Review) - Appt Status is Seen, Invoiced, Closed"
+Const dAppSTALiaison = "Total duration of Appts: Clinical Lead('Peer Review') - Appt Status is Seen, Invoiced, Closed"
+Const dAppCaseManagement = "Total duration of Appts: Admin(Medical File Review, Patient Referrals/follow up) - Appt Status is Seen, Invoiced, Closed"
+Const dAppGenAdm = "Total duration of Appts: Admin(General) - Appt Status is Seen, Invoiced, Closed"
+Const dAppMeeting = "Total duration of Appts: Meeting(Command Meeting, Staff Training, Community Networking) - Appt Status is Seen, Invoiced, Closed"
+Const dAppPreparation = "Total duration of Appts: Admin (Presentation Prep) - Appt Status is Seen, Invoiced, Closed"
+Const dAppPresentation = "Total duration of Appts: Unavailable (Presentation) - Appt Status is Seen, Invoiced, Closed"
+Const dNonSpecified = "Non-specified diagnoses"
+Const dTotalOfTopCodes = "Total number of individuals with one or more of the top presenting codes"
+Const dTotalOfSuicidalCodes = "Total number of individuals with one or more of the Suicidal codes"
+
+' Demographic Data section - row labels (Type column) and descriptions (Data details).
+Const cDemoMale         = "Gender - Male "
+Const cDemoFemale       = "Gender - Female"
+Const cDemoGenderDiv    = "Gender Diverse "
+Const cDemoMaori        = "Ethnicity - NZ Maori "
+Const cDemoPakeha       = "Ethnicity - Pakeha/NZ European"
+Const cDemoPasifika     = "Ethnicity - Pasifika"
+Const cDemoOther        = "Ethnicity - Other"
+
+' Description text appears only on the first row of each sub-block per the template.
+Const dDemoGenderFirst = "Singular count of unique Service numbers for the column category. Eg Encounter location, Provider, Service, Ethnicity"
+Const dDemoEthFirst    = "Singular count of unique Service numbers for the column category. Eg Encounter location, Provider, Service, Gender"
+Const dDemoBlank       = ""
+
+' Gender bucket keys (also used as column headers; trailing spaces match template)
+Const cGenderMale    = "Male "
+Const cGenderFemale  = "Female"
+Const cGenderDiverse = "Gender Diverse "
+
+' Ethnicity bucket keys (MoH prioritised categories; Maori > Pasifika > Other > Pakeha)
+Const cEthMaori    = "NZ Maori "
+Const cEthPakeha   = "Pakeha/NZ European"
+Const cEthPasifika = "Pasifika"
+Const cEthOther    = "Other"
+
+' Ethnicity lookup codes (strict interpretation: only these exact codes map)
+Const cEthCodeMaori  = "21"
+Const cEthCodePakeha = "11"
+' Pasifika codes per NZ MoH Level-2 ethnicity: 30..37
+aPasifikaCodes = Array("30","31","32","33","34","35","36","37")
+
+'arrMonitoringDiagnosis = Array("HYTE","WLBSUICINT","WELSUICINTPL","WLBSUICATT")
+arrMonitoringDiagnosis = Array("WLBSUICI","WLBSUICINT","WLBSUICINPL","WLBSUICATT")
+arrMonDiagnosisDesc = Array("Suicide Ideation","Suicidal Intent","Suicidal Intent with plan","Attempted Suicide")
+ 
+arrExclude = Array("PRACTASKVERS", "PRACAPPTBYTXT", "PRACAPPTREMINDE")
+arrExcludeFromTop = Array("WLBCORR","WLBCOMMCON","WLBCASECL","PRACCORRESPOTH","WLBADMIN","WLBEXTREFER", "MHP1", "MHP1/R","MHP2", "MHP2/R", "MHP3", "MHP3/R", "SOCIALWORK", cNonSpecified)
+arrMilServices = Array("Air Force - RF", "Army - RF", "Navy - RF", "Civilian", "Recruit", "Reserve Force", "None")
+
+' Fixed column-header arrays for the Gender and Ethnicity groupings
+aGenderHeaders    = Array(cGenderMale, cGenderFemale, cGenderDiverse)
+aEthnicityHeaders = Array(cEthMaori, cEthPakeha, cEthPasifika, cEthOther)
+
+'NZDF codes 
+aPosCodes =     Array("D000",     "D014",     "D023",    "D017",   "D015",  "D011",  "D018",    "D048",   "DHD",  "D016",  "D019")
+aPosLocations = Array("Devonport","Whenuapai","Papakura","Waiouru","Ohakea","Linton","Trentham","Wellington","Defence Health Directorate","Woodbourne","Burnham")
+
+Sub AddLineToReport(aEncLine)                                '==================
+  vReport.AddLine
+  vReport.CurrentItem(cType) = aEncLine.Code
+  vReport.CurrentItem(cDataDetails) = aEncLine.Description
+  CollectStatsEncounters aEncLine, false
+  vReport.CurrentItem(cTotal) = aEncLine.GetSum
+end Sub
+
+Sub AddLineToReportMerged(aEncLine)                             '==================
+  vReport.AddLine
+  vReport.CurrentItem(cType) = aEncLine.Code
+  vReport.CurrentItem(cDataDetails) = aEncLine.Description
+  CollectStatsEncounters aEncLine, true
+  vReport.CurrentItem(cTotal) = aEncLine.GetMergedSum
+end Sub
+
+Sub AddHeaderToReport(aStr)                                  '==================
+  aRept.AddRow
+  aRept.Cell(cType).Value = aStr
+  aRept.Cell(cType).Attributes = cRedColour 
+end Sub
+
+Sub AddGroupHeaderRow                                        '==================
+' Emit a single row labelling the column groups. Labels are placed in the first
+' column of each grouping; all other cells are left blank.
+  aRept.AddRow
+  If UBound(aPosLocations) >= 0 then
+    aRept.Cell(aPosLocations(0)).Value = "Locations"
+  End if
+  If aSWProviders.Count > 0 then
+    Set thisProv = aSWProviders.Items()(0)
+    aRept.Cell(thisProv.FullName).Value = "Providers"
+  End if
+  If aMilServiceList.Count > 0 then
+    aRept.Cell(aMilServiceList.Keys()(0)).Value = "Service"
+  End if
+  aRept.Cell(cGenderMale).Value = "Gender"
+  aRept.Cell(cEthMaori).Value = "Ethnicity"
+end Sub
+
+Sub CopyLineFromVirtualReport(aConvertToHours)                '=================
+  aRept.AddRow
+  gCurrentLine = gCurrentLine + 1
+  aRept.Cell(cType).Value = vReport.ItemValue(cType, gCurrentLine)
+  aRept.Cell(cDataDetails).Value = vReport.ItemValue(cDataDetails, gCurrentLine)
+
+  aValue = vReport.ItemValue(cTotal, gCurrentLine)
+  If aConvertToHours then: aValue = ConvertToHours(aValue) 
+  aRept.Cell(cTotal).Value = aValue
+  If aValue = "0" then: aRept.Cell(cTotal).Attributes = cGrayColour
+
+  For j = 0 to UBOUND(aPosLocations)
+    aValue = vReport.ItemValue(aPosLocations(j), gCurrentLine)
+    If aConvertToHours then: aValue = ConvertToHours(aValue) 
+    aRept.Cell(aPosLocations(j)).Value = aValue 
+    If aValue = "0" then: aRept.Cell(aPosLocations(j)).Attributes = cGrayColour
+  Next  ' j
+
+  For j = 0 to aSWProviders.count - 1
+    set thisProv = aSWProviders.Items()(j)               
+    aValue = vReport.ItemValue(thisProv.Code, gCurrentLine)
+    If aConvertToHours then: aValue = ConvertToHours(aValue) 
+    aRept.Cell(thisProv.FullName).Value = aValue
+    If aValue = "0" then: aRept.Cell(thisProv.FullName).Attributes = cGrayColour
+  Next  ' j 
+      
+  aPatientHeaders = aMilServiceList.Keys
+  For j = 0 to UBOUND(aPatientHeaders)
+    aValue = vReport.ItemValue(aPatientHeaders(j), gCurrentLine)
+    If aConvertToHours then: aValue = ConvertToHours(aValue) 
+    aRept.Cell(aPatientHeaders(j)).Value = aValue
+    If aValue = "0" then: aRept.Cell(aPatientHeaders(j)).Attributes = cGrayColour
+  Next  ' j
+
+  ' Gender columns
+  For j = 0 to UBound(aGenderHeaders)
+    aValue = vReport.ItemValue(aGenderHeaders(j), gCurrentLine)
+    If aConvertToHours then: aValue = ConvertToHours(aValue)
+    aRept.Cell(aGenderHeaders(j)).Value = aValue
+    If aValue = "0" then: aRept.Cell(aGenderHeaders(j)).Attributes = cGrayColour
+  Next
+
+  ' Ethnicity columns
+  For j = 0 to UBound(aEthnicityHeaders)
+    aValue = vReport.ItemValue(aEthnicityHeaders(j), gCurrentLine)
+    If aConvertToHours then: aValue = ConvertToHours(aValue)
+    aRept.Cell(aEthnicityHeaders(j)).Value = aValue
+    If aValue = "0" then: aRept.Cell(aEthnicityHeaders(j)).Attributes = cGrayColour
+  Next
+end Sub
+
+Sub LoadSWEncounters                                 '==========================
+  Set gTotalEncLine = gEncLines.Add(cTotalEncounters, dTotalEncounters)
+  Set gTotalEncCol = gTotalEncLine.GetCollection
+
+  Set gTotalPerLine = gPerLines.Add(cTotalNumberOfPer, dTotalNumberOfPer)
+  Set gTotalPerCol = gTotalPerLine.GetCollection
+  Set gTotalPerIndLine = gPerLines.Add(cTotalNumberOfIndividuals, dTotalNumberOfIndividuals)
+  Set gTotalPerIndCol = gTotalPerIndLine.GetCollection
+
+  ' Demographic data section: 3 Gender rows + 4 Ethnicity rows (cross-tab of
+  ' unique patients per column grouping; self-crossing cells left blank).
+  Set gDemoLines = New InternalLines
+  gDemoLines.Init()
+  gDemoLines.Add cDemoMale,      dDemoGenderFirst
+  gDemoLines.Add cDemoFemale,    dDemoBlank
+  gDemoLines.Add cDemoGenderDiv, dDemoBlank
+  gDemoLines.Add cDemoMaori,     dDemoEthFirst
+  gDemoLines.Add cDemoPakeha,    dDemoBlank
+  gDemoLines.Add cDemoPasifika,  dDemoBlank
+  gDemoLines.Add cDemoOther,     dDemoBlank
+  Set gDemoUniq = CreateObject("Scripting.Dictionary")
+
+  For each aEncounter in gEncounters
+    On Error Resume Next
+    set aPatient = Nothing
+    If aEncounter.PatientId > 0 then: set aPatient = LoadPatientCached(aEncounter.PatientId)
+    If FilteredPatient(aPatient) and FilteredProvider(aEncounter) then
+      For each aContact in aEncounter.Contacts
+        aDiagCode = aContact.DiagnosisCode
+        aDiagDesc = ExtractDiagCodeDesc(aEncounter, aDiagCode) 
+        If FilteredEncounterCode(aDiagCode) then
+          If not gEncLines.IsExist(aDiagCode) then: gEncLines.Add aDiagCode, aDiagDesc
+          AddSWEncounter aDiagCode, aDiagDesc, aEncounter
+          If not gPerLines.IsExist(aDiagCode) then: gPerLines.Add aDiagCode, aDiagDesc
+          AddSWEncounterPer aDiagCode, aDiagDesc, aEncounter
+       End if
+      Next
+    End if
+    On Error GoTo 0
+  Next
+end Sub
+
+Sub BuildDemographicLines                        '==============================
+' Walk gEncounters once, producing per-patient-per-column-bucket unique counts
+' in each of the 7 demographic InternalLines (3 Gender + 4 Ethnicity).
+' Self-crossings are skipped: a demographic row never populates columns of
+' its own category. E.g. the 'Gender - Male' row has blank Gender columns;
+' the 'Ethnicity - NZ Maori' row has blank Ethnicity columns.
+  Dim aDemoRowMap
+  ' Map each demographic row to the bucket key it matches and its category.
+  ' Category 'G' = Gender row (skip Gender cols), 'E' = Ethnicity row.
+  aDemoRowMap = Array( _
+    Array(cDemoMale,      cGenderMale,    "G"), _
+    Array(cDemoFemale,    cGenderFemale,  "G"), _
+    Array(cDemoGenderDiv, cGenderDiverse, "G"), _
+    Array(cDemoMaori,     cEthMaori,      "E"), _
+    Array(cDemoPakeha,    cEthPakeha,     "E"), _
+    Array(cDemoPasifika,  cEthPasifika,   "E"), _
+    Array(cDemoOther,     cEthOther,      "E") _
+  )
+
+  For each aEncounter in gEncounters
+    On Error Resume Next
+    set aPatient = Nothing
+    If aEncounter.PatientId > 0 then: set aPatient = LoadPatientCached(aEncounter.PatientId)
+    If not (aPatient is Nothing) and FilteredPatient(aPatient) and FilteredProvider(aEncounter) then
+      aPatKey = cStr(aEncounter.PatientId)
+      aPatGender = GetPatientGenderKey(aPatient)
+      aPatEth    = GetPatientEthnicityKey(aPatient)
+      aPatPos    = aEncounter.PosCode
+      aPatProv   = ""
+      If aEncounter.ProviderId > 0 then: aPatProv = aEncounter.ProviderCode
+      aPatSvc    = GetPatientService(aPatient)
+
+      ' Walk the 7 demo rows. The patient contributes to exactly 2 rows:
+      ' their matching Gender row and their matching Ethnicity row.
+      For r = 0 to UBound(aDemoRowMap)
+        aRowLabel = aDemoRowMap(r)(0)   ' Type value, e.g. 'Gender - Male '
+        aRowBucket = aDemoRowMap(r)(1)  ' Column key, e.g. cGenderMale
+        aRowCat    = aDemoRowMap(r)(2)  ' 'G' or 'E'
+
+        ' Is this patient a member of this demographic row?
+        bIncludeRow = False
+        If aRowCat = "G" then
+          If aPatGender = aRowBucket then: bIncludeRow = True
+        ElseIf aRowCat = "E" then
+          If aPatEth = aRowBucket then: bIncludeRow = True
+        End if
+
+        If bIncludeRow then
+          set aLine = gDemoLines.GetItemByKey(aRowLabel)
+          set aDict = aLine.GetCollection
+
+          ' Total column (unique patients in this demographic bucket, overall)
+          aUKey = aRowLabel & ":T:" & aPatKey
+          If not gDemoUniq.Exists(aUKey) then
+            gDemoUniq.Add aUKey, ""
+            aLine.AddSum 1
+          End if
+
+          ' POS column (unique patients in this bucket at this POS)
+          If aPatPos <> "" then
+            aUKey = aRowLabel & ":P:" & aPatPos & ":" & aPatKey
+            If not gDemoUniq.Exists(aUKey) then
+              gDemoUniq.Add aUKey, ""
+              AddToColumnColl aDict, aPatPos, 1
+            End if
+          End if
+
+          ' Provider column (unique patients in this bucket seen by this provider)
+          If aPatProv <> "" then
+            aUKey = aRowLabel & ":V:" & aPatProv & ":" & aPatKey
+            If not gDemoUniq.Exists(aUKey) then
+              gDemoUniq.Add aUKey, ""
+              AddToColumnColl aDict, aPatProv, 1
+            End if
+          End if
+
+          ' MilService column (unique patients in this bucket with this service)
+          If aPatSvc <> "" then
+            aUKey = aRowLabel & ":S:" & aPatSvc & ":" & aPatKey
+            If not gDemoUniq.Exists(aUKey) then
+              gDemoUniq.Add aUKey, ""
+              AddToColumnColl aDict, aPatSvc, 1
+            End if
+          End if
+
+          ' Cross-demographic columns only.
+          ' For Gender rows, populate Ethnicity columns (skip Gender columns).
+          ' For Ethnicity rows, populate Gender columns (skip Ethnicity columns).
+          If aRowCat = "G" then
+            aUKey = aRowLabel & ":X:" & aPatEth & ":" & aPatKey
+            If not gDemoUniq.Exists(aUKey) then
+              gDemoUniq.Add aUKey, ""
+              AddToColumnColl aDict, aPatEth, 1
+            End if
+          ElseIf aRowCat = "E" then
+            aUKey = aRowLabel & ":X:" & aPatGender & ":" & aPatKey
+            If not gDemoUniq.Exists(aUKey) then
+              gDemoUniq.Add aUKey, ""
+              AddToColumnColl aDict, aPatGender, 1
+            End if
+          End if
+        End if
+      Next ' r
+    End if
+    On Error GoTo 0
+  Next
+end Sub
+
+Sub FindTopLines                                    '===========================
+  Dim arrCounts(4), key, i, j, tempCount, tempKey, result
+  
+  For i = 0 To UBound(arrKeys)
+    arrKeys(i) = ""
+    arrCounts(i) = 0
+  Next
+
+  ' Find the five most common diagnoses
+  set aTempEncLines = New InternalLines
+  aTempEncLines.Init()
+
+  'Build a scratch copy of our InternalLines list of encounter counts per diagnosis,
+  '  except merge each diagnosis code with its review code  
+  For i = 1 To gEncLines.ItemCount - 1 ' skip the single total 
+    set aEncLine = gEncLines.GetItem(i)
+    aDiagCode = aEncLine.Code
+    key = Replace(aDiagCode, "/R", "")
+    aDesc = Replace(aEncLine.Description, " (Review)", "")
+
+    ' If it's already there, it's a review code, so append its counts
+    If aTempEncLines.IsExist(key) then
+      set aTempEncLine = aTempEncLines.GetItemByKey(key)
+      aTempEncLine.SumAll(aEncLine)
+    else  
+      Set aTempEncLine = aTempEncLines.Add(key, aDesc)
+      aTempEncLine.Assign(aEncLine)  ' Just copy the counts
+    End if
+  Next
+
+  ' Sort the scratch list by the totals column, retaining only the top five
+  For i = 0 To aTempEncLines.ItemCount - 1  
+    set aEncLine = aTempEncLines.GetItem(i)
+    key = aEncLine.Code
+ 
+    If inArray(arrExcludeFromTop, key) < 0 then  
+      count = aEncLine.GetSum     ' Get the counts For each key 
+
+      If count > arrCounts(UBound(arrKeys)) Then
+        arrKeys(UBound(arrKeys)) = key
+        arrCounts(UBound(arrKeys)) = count
+            
+        For j = UBound(arrKeys) - 1 To 0 Step - 1  ' Sort the array in descending order of count
+          If arrCounts(j) < arrCounts(j + 1) Then
+             tempCount = arrCounts(j)        :  tempKey = arrKeys(j)
+             arrCounts(j) = arrCounts(j + 1) :  arrKeys(j) = arrKeys(j + 1)
+             arrCounts(j + 1) = tempCount    :  arrKeys(j + 1) = tempKey
+          End if
+        Next
+      End if
+    End If  ' If inArray(arrExcludeFromTop, aCode)
+  Next
+
+  ' Now that we know the top five, add them to both the Highest Encounters and Highest Per report sections
+
+  ' (By convention, the totals line comes first in a virtual report section,
+  '  even though it will come last in the actual report.)
+  set gTotalTopPerLine = gTopPerLines.Add(cTotalOfTopCodes, dTotalOfTopCodes)  
+  
+  For i = 0 To UBound(arrKeys)       ' top presenting codes
+    If arrKeys(i) <> "" then
+      set aEncLine = aTempEncLines.GetItemByKey(arrKeys(i))
+      Set aTopEncLine = gTopEncLines.Add(arrKeys(i), aEncLine.Description)
+      aTopEncLine.SumAll(aEncLine)  ' Copy all counts from scratch line to VReport line
+
+      gTopPerLines.Add arrKeys(i), aEncLine.Description ' top list should be the same for enc and per 
+    End if
+  Next
+
+  ' Calculate Highest Per totals
+  set aTempPerLines = New InternalLines
+  aTempPerLines.Init()
+
+  ' Merge diagnosis code with its review code  
+  For i = 2 To gPerLines.ItemCount - 1 ' skip totals 
+    set aEncLine = gPerLines.GetItem(i)
+    aDiagCode = aEncLine.Code
+    key = Replace(aDiagCode, "/R", "")
+
+    If aTempPerLines.IsExist(key) then
+      set aTempPerLine = aTempPerLines.GetItemByKey(key)
+      aTempPerLine.SumAll(aEncLine)
+    else  
+      Set aTempPerLine = aTempPerLines.Add(key, aEncLine.Description)
+      aTempPerLine.Assign(aEncLine)
+    End if
+  Next
+
+  For i = 1 To gTopPerLines.ItemCount - 1           ' top presenting codes For Per
+    set aTopPerLine = gTopPerLines.GetItem(i)
+    key = aTopPerLine.Code
+    If aTempPerLines.IsExist(key) then
+      set aEncLine = aTempPerLines.GetItemByKey(key)
+      aTopPerLine.Assign(aEncLine)
+    End if
+  Next
+
+  'Monitored diagnoses
+
+  ' Add encounter lines and copy counts from scratch list to virtual report
+  For i = 0 To UBound(arrMonitoringDiagnosis)
+    aDiagCode = arrMonitoringDiagnosis(i)
+    set aMonEncLine = gMonEncLines.Add(aDiagCode, arrMonDiagnosisDesc(i))
+    If aTempEncLines.IsExist(aDiagCode) then
+      set aEncLine = aTempEncLines.GetItemByKey(aDiagCode)
+      aMonEncLine.SumAll(aEncLine)
+    End if
+  Next
+
+  ' Add person count lines too (again, totals line comes first)
+  set gTotalMonPerLine = gMonPerLines.Add(cTotalOfSuicidalCodes, dTotalOfSuicidalCodes)  
+  For i = 0 To UBound(arrMonitoringDiagnosis)
+    aDiagCode = arrMonitoringDiagnosis(i)
+    set aMonPerLine = gMonPerLines.Add(aDiagCode, arrMonDiagnosisDesc(i))
+    If aTempPerLines.IsExist(aDiagCode) then
+      set aEncLine = aTempPerLines.GetItemByKey(aDiagCode)
+      aMonPerLine.Assign(aEncLine)
+    End if
+  Next
+end Sub
+
+Sub CalcTopMonTotals
+  For each aEncounter in gEncounters         ' only counts totals lines here
+    On Error Resume Next
+    If (aEncounter.PatientId > 0) and (aEncounter.ProviderId > 0) then
+      set aPatient = LoadPatientCached(aEncounter.PatientId)
+      If FilteredPatient(aPatient) and FilteredProvider(aEncounter) then
+        For each aContact in aEncounter.Contacts
+          aDiagCode = Replace(aContact.DiagnosisCode, "/R", "")  ' merge code with its review
+          If FilteredEncounterCode(aDiagCode) then
+            If InArray(arrKeys, aDiagCode) > -1 then  'top code
+              AddSWEncounterInd gTotalTopPerLine, "T", aEncounter
+            End if
+            If InArray(arrMonitoringDiagnosis, aDiagCode) > -1 then  'monitored
+              AddSWEncounterInd gTotalMonPerLine, "S", aEncounter
+            End if
+         End if
+        Next
+      End if
+    End if
+    On Error GoTo 0
+  Next
+End sub
+
+' Add to all encounter line counts for this diagnosis
+Sub AddSWEncounter(aDiagCode, aDiagDesc, aEncounter) '==========================
+  set aEncLine = gEncLines.GetItemByKey(aDiagCode)
+  set aDict = aEncLine.GetCollection
+  key = aEncounter.PosCode
+  AddToColumnColl aDict, key, 1 
+  aEncLine.AddSum 1
+  gTotalEncCol.Item(key) = gTotalEncCol.Item(key) + 1
+  gTotalEncLine.AddSum 1
+  
+  If aEncounter.ProviderId > 0 then
+    key = aEncounter.ProviderCode
+    AddToColumnColl aDict, key, 1 
+    gTotalEncCol.Item(key) = gTotalEncCol.Item(key) + 1
+  End if
+  
+  If aEncounter.PatientId > 0 then
+    set aPatient = LoadPatientCached(aEncounter.PatientId)
+    key = GetPatientService(aPatient)
+
+    If not aMilServiceList.Exists(key) then
+      aMilServiceList.Add key, aPatient.ID
+    End if
+    AddToColumnColl aDict, key, 1 
+    gTotalEncCol.Item(key) = gTotalEncCol.Item(key) + 1
+
+    ' Gender + Ethnicity breakdowns
+    aKeyGender = GetPatientGenderKey(aPatient)
+    AddToColumnColl aDict, aKeyGender, 1
+    gTotalEncCol.Item(aKeyGender) = gTotalEncCol.Item(aKeyGender) + 1
+    aKeyEth = GetPatientEthnicityKey(aPatient)
+    AddToColumnColl aDict, aKeyEth, 1
+    gTotalEncCol.Item(aKeyEth) = gTotalEncCol.Item(aKeyEth) + 1
+  End if
+end Sub
+
+' Add to patient counts for this diagnosis, unless patient has appeared before
+Sub AddSWEncounterPer(aDiagCode, aDiagDesc, aEncounter)        '=============
+  If aEncounter.PatientId = 0 then: Exit Sub
+  If aEncounter.ProviderId = 0 then: Exit Sub
+  set aPatient = LoadPatientCached(aEncounter.PatientId)
+
+  set aEncLine = gPerLines.GetItemByKey(aDiagCode)
+  set aDict = aEncLine.GetCollection
+  set aMergedDict = aEncLine.GetMergedCollection
+
+  aKeyPatient = cStr(aEncounter.PatientId)              ' uniq For Patient Id
+  aKeyPOS = aEncounter.PosCode
+  aKeyService = GetPatientService(aPatient)
+  aKeyProv = aEncounter.ProviderCode
+  aKeyMergedDiag = Replace(aDiagCode, "/R", "")
+
+  ' If this is the first appearance of this patient at this POS for this diagnosis, count it
+  key = aKeyPOS + ":" + aKeyPatient + ":" + aDiagCode
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    AddToColumnColl aDict, aKeyPOS, 1 
+    gTotalPerCol.Item(aKeyPOS) = gTotalPerCol.Item(aKeyPOS) + 1
+    gTotalPerLine.AddSum 1
+
+    ' If also first appearance of patient at this POS for this diagnosis or its review, count it
+    key = "M:" & aKeyPOS + ":" + aKeyPatient + ":" + aKeyMergedDiag
+    If not gPerUniq.Exists(key) then
+      gPerUniq.Add key, ""
+      AddToColumnColl aMergedDict, aKeyPOS, 1 
+    End if
+
+    ' If this is also the first appearance of patient at this POS for any diagnosis, count it
+    key = aKeyPOS + ":" + aKeyPatient
+    If not gPerUniq.Exists(key) then
+      gPerUniq.Add key, ""
+      gTotalPerIndCol.Item(aKeyPOS) = gTotalPerIndCol.Item(aKeyPOS) + 1
+    End if
+
+    ' If first appearance of patient anywhere for this diagnosis, count it
+    key = aKeyPatient & ":" & aDiagCode
+    If not gPerUniq.Exists(key) then
+      gPerUniq.Add key, ""
+      aEncLine.AddSum 1
+    End if
+
+    ' If first appearance of patient anywhere for this diagnosis or its review, count it
+    key = "M:" & aKeyPatient & ":" & aKeyMergedDiag
+    If not gPerUniq.Exists(key) then
+      gPerUniq.Add key, ""
+      aEncLine.AddMergedSum 1
+    End if
+
+    ' If this is the first appearance of this patient at all, count it
+    key = "U:" & aKeyPatient
+    If not gPerUniq.Exists(key) then
+      gPerUniq.Add key, ""
+      gTotalPerIndLine.AddSum 1
+    End if
+  End if
+
+  ' If first appearance of this patient with this provider for this diagnosis, count it
+  key = aKeyProv + ":" + aKeyPatient + ":" + aDiagCode
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    AddToColumnColl aDict, aKeyProv, 1 
+    gTotalPerCol.Item(aKeyProv) = gTotalPerCol.Item(aKeyProv) + 1
+
+    ' If also first appearance of patient with this provider for this diagnosis or its review, count it
+    key = "M:" & aKeyProv + ":" + aKeyPatient + ":" + aKeyMergedDiag
+    If not gPerUniq.Exists(key) then
+      gPerUniq.Add key, ""
+      AddToColumnColl aMergedDict, aKeyProv, 1 
+    End if
+
+    ' If also first appearance of patient with this provider for any reason, count it
+    key = aKeyProv + ":" + aKeyPatient 
+    If not gPerUniq.Exists(key) then
+      gPerUniq.Add key, ""
+      gTotalPerIndCol.Item(aKeyProv) = gTotalPerIndCol.Item(aKeyProv) + 1
+    End if
+  End if
+
+  ' If first appearance of this patient in this service for this diagnosis, count it
+  key = aKeyService + ":" + aKeyPatient + ":" + aDiagCode
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    AddToColumnColl aDict, aKeyService, 1 
+    gTotalPerCol.Item(aKeyService) = gTotalPerCol.Item(aKeyService) + 1
+
+    ' If also first appearance of patient in this service for this diagnosis or its review, count it
+    key = "M:" & aKeyService + ":" + aKeyPatient + ":" + aKeyMergedDiag
+    If not gPerUniq.Exists(key) then
+      gPerUniq.Add key, ""
+      AddToColumnColl aMergedDict, aKeyService, 1 
+    End if
+
+    ' If also first appearance of patient in this service for any diagnosis, count it
+    key = aKeyService + ":" + aKeyPatient 
+    If not gPerUniq.Exists(key) then
+      gPerUniq.Add key, ""
+      gTotalPerIndCol.Item(aKeyService) = gTotalPerIndCol.Item(aKeyService) + 1
+    End if
+  End if
+
+  ' Gender bucket (same dedup pattern as Service)
+  aKeyGender = GetPatientGenderKey(aPatient)
+  key = aKeyGender + ":" + aKeyPatient + ":" + aDiagCode
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    AddToColumnColl aDict, aKeyGender, 1
+    gTotalPerCol.Item(aKeyGender) = gTotalPerCol.Item(aKeyGender) + 1
+
+    key = "M:" & aKeyGender + ":" + aKeyPatient + ":" + aKeyMergedDiag
+    If not gPerUniq.Exists(key) then
+      gPerUniq.Add key, ""
+      AddToColumnColl aMergedDict, aKeyGender, 1
+    End if
+
+    key = aKeyGender + ":" + aKeyPatient
+    If not gPerUniq.Exists(key) then
+      gPerUniq.Add key, ""
+      gTotalPerIndCol.Item(aKeyGender) = gTotalPerIndCol.Item(aKeyGender) + 1
+    End if
+  End if
+
+  ' Ethnicity bucket (same dedup pattern)
+  aKeyEth = GetPatientEthnicityKey(aPatient)
+  key = aKeyEth + ":" + aKeyPatient + ":" + aDiagCode
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    AddToColumnColl aDict, aKeyEth, 1
+    gTotalPerCol.Item(aKeyEth) = gTotalPerCol.Item(aKeyEth) + 1
+
+    key = "M:" & aKeyEth + ":" + aKeyPatient + ":" + aKeyMergedDiag
+    If not gPerUniq.Exists(key) then
+      gPerUniq.Add key, ""
+      AddToColumnColl aMergedDict, aKeyEth, 1
+    End if
+
+    key = aKeyEth + ":" + aKeyPatient
+    If not gPerUniq.Exists(key) then
+      gPerUniq.Add key, ""
+      gTotalPerIndCol.Item(aKeyEth) = gTotalPerIndCol.Item(aKeyEth) + 1
+    End if
+  End if
+
+end Sub
+
+' Check for duplicate patients according to tag:
+'    T = use for Top 5 Presenting Diagnoses counts
+'    S = use for Monitored Diagnoses counts
+' In both cases, count patient only if they haven't aready been counted for this 
+'    POS/provider/military service or for this top-5/monitored diagnosis.
+Sub AddSWEncounterInd(aEncLine, aIndPref, aEncounter)        '=============
+'  Const cIndPref = "*I*"         ' save individuals For totals 
+  If aEncounter.PatientId = 0 then: Exit Sub
+  If aEncounter.ProviderId = 0 then: Exit Sub
+  set aPatient = LoadPatientCached(aEncounter.PatientId)
+
+  set aDict = aEncLine.GetCollection
+  aKeyPatient = cStr(aEncounter.PatientId)              ' uniq For Patient Id
+  aKeyPOS = aEncounter.PosCode
+  aKeyService = GetPatientService(aPatient)
+  aKeyProv = aEncounter.ProviderCode
+
+  key = aIndPref + ":" + aKeyPOS + ":" + aKeyPatient
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    AddToColumnColl aDict, aKeyPOS, 1 
+  End if
+
+  key = aIndPref + ":" + aKeyProv + ":" + aKeyPatient
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    AddToColumnColl aDict, aKeyProv, 1 
+  End if
+
+  key = aIndPref + ":" + aKeyService + ":" + aKeyPatient
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    AddToColumnColl aDict, aKeyService, 1 
+  End if
+
+  ' Gender + Ethnicity buckets (dedup per tag+bucket+patient)
+  aKeyGender = GetPatientGenderKey(aPatient)
+  key = aIndPref + ":" + aKeyGender + ":" + aKeyPatient
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    AddToColumnColl aDict, aKeyGender, 1
+  End if
+
+  aKeyEth = GetPatientEthnicityKey(aPatient)
+  key = aIndPref + ":" + aKeyEth + ":" + aKeyPatient
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    AddToColumnColl aDict, aKeyEth, 1
+  End if
+
+  key = aIndPref + ":" + aKeyPatient
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    aEncLine.AddSum 1
+  End if
+end Sub
+
+' Fill virtual report line with counts from InternalLine object
+Sub CollectStatsEncounters(aEncLine, bUseMerged) 
+  if bUseMerged then
+    set aCol = aEncLine.GetMergedCollection
+  else
+    set aCol = aEncLine.GetCollection
+  end if
+
+  For i = 0 to aCol.Count - 1
+    aKey = aCol.Keys()(i)
+    aItem = aCol.Items()(i)
+
+    For j = 0 to UBound(aPosLocations)     'Location counts
+      If aPosCodes(j) = aKey then
+        vReport.CurrentItem(aPosLocations(j)) = aItem 
+      End if
+    Next  ' j
+
+    'Provider counts - direct dictionary lookup instead of O(P) scan
+    If aSWProviders.Exists(aKey) then
+      vReport.CurrentItem(aKey) = aItem 
+    End if
+      
+    aPatientHeaders = aMilServiceList.Keys 'Patient service  Counts
+    For j = 0 to UBOUND(aPatientHeaders)
+      If aPatientHeaders(j) = aKey then 
+        vReport.CurrentItem(aPatientHeaders(j)) = aItem 
+      end If   
+    Next  ' j 
+
+    ' Gender columns
+    For j = 0 to UBound(aGenderHeaders)
+      If aGenderHeaders(j) = aKey then
+        vReport.CurrentItem(aKey) = aItem
+      End if
+    Next
+
+    ' Ethnicity columns
+    For j = 0 to UBound(aEthnicityHeaders)
+      If aEthnicityHeaders(j) = aKey then
+        vReport.CurrentItem(aKey) = aItem
+      End if
+    Next
+  Next 'i  
+end Sub
+
+' Create columns for virtual report
+Sub CreateVirtualReportItems(aHeader)                    '======================
+  If isArray(aHeader) then 
+    For i = 0 to UBOUND(aHeader)
+      vReport.AddItem aHeader(i) 
+    Next
+  Else  ' aHeader is a dictionary 
+    For i = 0 to aHeader.count - 1
+      vReport.AddItem aHeader.Keys()(i) 
+    Next
+  End if
+End Sub 
+
+Sub CreateReportColumn(aHeader, aDataType)              '======================= 
+  aWidth = 100
+  If isArray(aHeader) then 
+    For i = 0 to UBOUND(aHeader)
+      aRept.AddColumn aHeader(i), aWidth, alignleft, false, aDataType 
+    Next
+  Else  ' aHeader is a dictionary 
+    For i = 0 to aHeader.count - 1
+      set thisProv = aHeader.Items()(i)
+      aRept.AddColumn thisProv.Fullname, aWidth, alignleft, false, aDataType 
+    Next
+  End if
+End Sub 
+
+Function ExtractDiagCodeDesc(aEncounter, ByRef aDiagCode) '=====================
+  ind = Instr(aDiagCode, ":")
+  aDiagCode = mid(aDiagCode, ind + 1, 99)
+  If aDiagCode = "" then: aDiagCode = cNonSpecified  
+  If aDiagCode = cNonSpecified then
+    ExtractDiagCodeDesc = dNonSpecified
+  else
+    set aDiag = Profile.LoadDisease(aDiagCode)
+    If not (aDiag is nothing) then
+      ExtractDiagCodeDesc = aDiag.Description
+    else
+      ExtractDiagCodeDesc = aEncounter.Contacts(0).Diagnosis.Description
+    End if
+  End if
+End Function 
+
+Sub LoadSWCases                                '================================       
+'=== Get three lists of cases for each Social Worker case type:
+'     Social Work      (case-type code: Social)
+'     Social Work HSB  (case-type code: SWHSB)
+' For each type, load:
+'   New Cases opened within the time period
+'   Cases that were Open as at the report end date (SW is the Lead Carer)
+'   Cases Closed within the time period
+
+  Set NewSWCasesList    = CreateObject("Scripting.Dictionary")
+  Set OpenSWCasesList   = CreateObject("Scripting.Dictionary")
+  Set ClosedSWCasesList = CreateObject("Scripting.Dictionary")
+  LoadCaseTypeCases "Social", NewSWCasesList, OpenSWCasesList, ClosedSWCasesList
+
+  Set NewHSBCasesList    = CreateObject("Scripting.Dictionary")
+  Set OpenHSBCasesList   = CreateObject("Scripting.Dictionary")
+  Set ClosedHSBCasesList = CreateObject("Scripting.Dictionary")
+  LoadCaseTypeCases "SWHSB", NewHSBCasesList, OpenHSBCasesList, ClosedHSBCasesList
+end Sub
+
+Sub LoadCaseTypeCases(aTypeCode, aNewList, aOpenList, aClosedList)  '============
+'=== Load three case lists (new, open-as-at-end-date, closed) for one case type.
+  set aCaseTypesFilter = Profile.CreateCaseTypesFilter
+  aCaseTypesFilter.Code = aTypeCode
+  set aCaseTypes = Profile.LoadCaseTypes(aCaseTypesFilter)
+  If aCaseTypes.Count = 0 then
+    If GetRunningApplicationType <> 0 then
+       Profile.Msgbox "Case type " & aTypeCode & " not found"
+    End if   
+    Exit Sub
+  End if
+  set aCaseType = aCaseTypes.Item(0)
+
+  ' Cases opened within the reporting period
+  set aFilter = Profile.CreateCasesFilter
+  aFilter.OpenedFrom = aStartDate
+  aFilter.OpenedTo = aEndDate
+  aFilter.CaseType = aCaseType
+  LoadCasesAndPatientServices aNewList, aFilter
+
+  ' Cases that were Open as at the report end date
+  set aFilter = Profile.CreateCasesFilter
+  aFilter.OpenedTo = aEndDate
+  aFilter.CaseType = aCaseType
+  LoadOpenCasesAsAt aOpenList, aFilter, aEndDate
+
+  ' Cases closed within the reporting period
+  set aFilter = Profile.CreateCasesFilter
+  aFilter.ClosedFrom = aStartDate
+  aFilter.ClosedTo = aEndDate
+  aFilter.Status = 4 'Closed
+  aFilter.CaseType = aCaseType
+  LoadCasesAndPatientServices aClosedList, aFilter
+end Sub
+
+Sub ReadProvidersBySpeciality(aSpec)              '=============================
+  dim NameArray(), CodeArray()
+  set aConcepts = Profile.LoadConceptsByName(aSpec, "Intrahealth") 
+  For each aConcept in aConcepts
+   if aConcept.Name = aSpec then Exit For
+  Next
+  if aConcept.Name <> aSpec then
+    Err.Raise vbObjectError, "Profile", aSpec & " - No concept found"
+  end if
+  
+  Set PPPUFilter = Profile.CreateProvidersFilter
+  PPPUFilter.SpecialityConcept = aConcept
+  set aProvs = Profile.LoadProvidersByFilter(PPPUFilter)
+  redim NameArray(aProvs.Count - 1)
+  redim CodeArray(aProvs.Count - 1)
+
+  ix = 0
+  For each aProv in aProvs
+    ' Record provider's surname and service number in parallel arrays
+    NameArray(ix) = aProv.LastName
+    CodeArray(ix) = aProv.Code
+
+    ' Bubble new entry in both arrays to its alphabetical position
+    for j = ix to 1 step -1
+      if NameArray(j - 1) > NameArray(j) then
+        aTempName = NameArray(j - 1)
+        aTempCode = CodeArray(j - 1)
+        NameArray(j - 1) = NameArray(j)
+        NameArray(j) = aTempName
+        CodeArray(j - 1) = CodeArray(j)
+        CodeArray(j) = aTempCode
+      end if
+    next
+    ix = ix + 1
+  Next
+
+  ' Populate the aSWProviders dictionary in alphabetical order
+  For i = 0 to UBound(NameArray)
+    set aProv = Profile.LoadProvider(CodeArray(i))
+    If not aSWProviders.Exists(aProv.Code) then: aSWProviders.Add aProv.Code, aProv
+  Next
+end Sub
+
+'--- Fill in the totals For each column of this set of Cases -- 
+Sub CollectStats(aCases)                                        '===============
+  For i = 0 to aCases.Count - 1
+    set thisCase = aCases.Items()(i)
+
+    ' Compute per-case values once, outside the column loops.
+    ' GetCaseServicePOSCode runs a Profile.LoadCaseServices DB query, and
+    ' GetCasePatientService does a patient load; previously both were called
+    ' inside inner loops (O(cases * columns) DB hits).
+    aCasePosCode = GetCaseServicePOSCode(thisCase)
+    aCasePatSvc  = GetCasePatientService(thisCase)
+    set aCasePatient = Nothing
+    If not (thisCase.Patient is Nothing) then
+      set aCasePatient = LoadPatientCached(thisCase.Patient.Id)
+    End if
+ 
+    For j = 0 to UBOUND(aPosLocations)     'Location counts
+      If aPosCodes(j) = aCasePosCode then
+        vReport.CurrentItem(aPosLocations(j)) = vReport.CurrentItem(aPosLocations(j)) + 1 
+        vReport.CurrentItem(cTotal) = vReport.CurrentItem(cTotal) + 1 
+      End if
+    Next  ' j
+
+    For j = 0 to aSWProviders.count - 1     'Provider Counts
+      set thisProv = aSWProviders.Items()(j)
+      If thisCase.Case_Manager is Nothing then 
+          
+      elseIf thisCase.Case_Manager.Id = thisProv.Id  then 
+        vReport.CurrentItem(thisProv.Code) = vReport.CurrentItem(thisProv.Code) + 1 
+      End If    
+    Next  ' j 
+            
+    aPatientHeaders = aMilServiceList.Keys     'Patient service  Counts
+    For j = 0 to UBOUND(aPatientHeaders)
+      If aPatientHeaders(j) = aCasePatSvc then 
+        vReport.CurrentItem(aPatientHeaders(j)) = vReport.CurrentItem(aPatientHeaders(j)) + 1 
+      end If   
+    Next  ' j 
+
+    ' Gender + Ethnicity counts (from the case's patient)
+    If not (aCasePatient is Nothing) then
+      aKeyGender = GetPatientGenderKey(aCasePatient)
+      vReport.CurrentItem(aKeyGender) = vReport.CurrentItem(aKeyGender) + 1
+      aKeyEth = GetPatientEthnicityKey(aCasePatient)
+      vReport.CurrentItem(aKeyEth) = vReport.CurrentItem(aKeyEth) + 1
+    End if
+  Next  ' i 
+end Sub
+
+' Fill in the totals For each column of this set of Appts --
+Sub CollectStatsApp(aAppLine)                                   '===================
+  set aCol = aAppLine.GetCollection
+
+  For i = 0 to aCol.Count - 1
+    aKey = aCol.Keys()(i)
+    aItem = aCol.Items()(i)
+    
+    For j = 0 to UBound(aPosLocations)     'Location counts
+      If aPosCodes(j) = aKey then
+        vReport.CurrentItem(aPosLocations(j)) = aItem 
+      End if
+    Next  ' j
+
+    'Provider counts - direct dictionary lookup instead of O(P) scan
+    If aSWProviders.Exists(aKey) then
+      vReport.CurrentItem(aKey) = aItem 
+    End if
+      
+    aPatientHeaders = aMilServiceList.Keys     'Patient service  Counts
+    For j = 0 to UBOUND(aPatientHeaders)
+      If aPatientHeaders(j) = aKey then 
+        vReport.CurrentItem(aPatientHeaders(j)) = aItem 
+      end If   
+    Next  ' j 
+
+    ' Gender columns
+    For j = 0 to UBound(aGenderHeaders)
+      If aGenderHeaders(j) = aKey then
+        vReport.CurrentItem(aKey) = aItem
+      End if
+    Next
+
+    ' Ethnicity columns
+    For j = 0 to UBound(aEthnicityHeaders)
+      If aEthnicityHeaders(j) = aKey then
+        vReport.CurrentItem(aKey) = aItem
+      End if
+    Next
+  Next 'i
+  vReport.CurrentItem(cTotal) = aAppLine.GetSum ' aTotal 
+end Sub
+
+Sub LoadAppts                                         '=========================
+'=== Get a list of Appointments
+  set aAppFilter = Profile.CreateAppointmentFilter
+  aAppFilter.DateFrom = aStartDate
+  aAppFilter.DateTo = aEndDate
+  aAppFilter.UseTimeLimits = True
+  set aApps = Profile.LoadAppointments(aAppFilter)
+
+  For i = 0 to aApps.Count - 1  
+    set app = aApps.Item(i)
+    If FilteredPatient(app.Patient) and aSWProviders.Exists(app.ProviderCode) then
+      bHasPatient = not (app.Patient is Nothing)
+      bSeenClosedOrInvoiced = (app.Status = 8 or app.Status = 16 or app.Status = 32) '  sasSeen{8}, sasClosed{16}, sasInvoiced{32}
+      wasDNA = (app.Status = 512)        ' sasDidNotAttend{512}
+      wasCancelled = (app.Status = 256)  ' sasCancelled{256}
+      WasCancelledOrDNA = (wasCancelled or wasDNA) 
+      
+      If ((app.TypeCode = "CONSULT") and ((app.ReasonCode = "COMMANDM") or (app.ReasonCode = "HEALTHPROVL") )) _
+      and bSeenClosedOrInvoiced and not WasCancelledOrDNA then 
+        AddAppDuration gAppLines.GetItemByKey(cAppTotalClientRelated), app
+      End if
+      
+      If (((app.TypeCode = "CONSULT") or (app.TypeCode = "TELCON")) and (app.ReasonCode = "SOCIALWORK")) _
+      and bHasPatient and bSeenClosedOrInvoiced and not WasCancelledOrDNA then
+        AddAppDuration gAppLines.GetItemByKey(cAppTotalClientContact), app
+      End if
+      
+      If ((app.TypeCode = "CONSULT") and (app.ReasonCode = "SOCIALWORK")) _
+      and bHasPatient and bSeenClosedOrInvoiced and not WasCancelledOrDNA then
+        AddAppNumber gAppLines.GetItemByKey(cNumberConsultSocialWork), app
+        AddAppNumberPer gAppLines.GetItemByKey(cNumberConsultSocialWorkPer), app, "CONSULT"
+      End if
+
+      If ((app.TypeCode = "TELCON") and (app.ReasonCode = "SOCIALWORK")) _
+      and bHasPatient and bSeenClosedOrInvoiced and not WasCancelledOrDNA then
+        AddAppNumber gAppLines.GetItemByKey(cNumberTeleconSocialWork), app
+        AddAppNumberPer gAppLines.GetItemByKey(cNumberTeleconSocialWorkPer), app, "TELCON"
+      End if
+      
+      If ((app.TypeCode = "TELCON") or (app.TypeCode = "CONSULT")) and (app.ReasonCode = "SOCIALWORK") _
+      and bHasPatient and wasDNA then
+        AddAppDuration gAppLines.GetItemByKey(cAppTotalDNA), app
+      end If 
+ 
+      If (((app.TypeCode = "MEETING") and ((app.ReasonCode = "PATREFFOLL") or (app.ReasonCode = "HEALTHPROVL") or (app.ReasonCode = "COMMANDL") or (app.ReasonCode = "PEERREV"))) _
+      or ((app.TypeCode = "TELCON") and (app.ReasonCode = "PATREFFOLL"))) _
+      and bSeenClosedOrInvoiced and not WasCancelledOrDNA then  
+        AddAppDuration gAppLines.GetItemByKey(cAppCorrespondence), app
+      End if
+
+      If (app.TypeCode = "CLINLEAD") _
+      and bSeenClosedOrInvoiced and not WasCancelledOrDNA then  
+        AddAppDuration gAppLines.GetItemByKey(cAppSTALiaison), app
+      end If 
+ 
+      If ((app.TypeCode = "ADMIN") and ((app.ReasonCode = "MEDFILEREVIEW") or (app.ReasonCode = "PATREFFOLL"))) _
+      and bSeenClosedOrInvoiced and not WasCancelledOrDNA then  
+        AddAppDuration gAppLines.GetItemByKey(cAppCaseManagement), app
+      End if
+
+      If (app.TypeCode = "ADMIN") and (app.ReasonCode = "GENERAL") _
+      and bSeenClosedOrInvoiced and not WasCancelledOrDNA then
+        AddAppDuration gAppLines.GetItemByKey(cAppGenAdm), app
+      end If 
+
+      If ((app.TypeCode = "MEETING") and ((app.ReasonCode = "COMMANDM") or (app.ReasonCode = "STAFFTRAIN") or (app.ReasonCode = "COMMNW"))) _
+      and bSeenClosedOrInvoiced and not WasCancelledOrDNA then  
+        AddAppDuration gAppLines.GetItemByKey(cAppMeeting), app
+      End if
+
+      If (app.TypeCode = "ADMIN") and (app.ReasonCode = "PRESENTPREP") _
+      and bSeenClosedOrInvoiced and not WasCancelledOrDNA then
+        AddAppDuration gAppLines.GetItemByKey(cAppPreparation), app
+      end If 
+
+      If (app.TypeCode = "UNAVAIL") and (app.ReasonCode = "PRESENTATION") _
+      and bSeenClosedOrInvoiced and not WasCancelledOrDNA then
+        AddAppDuration gAppLines.GetItemByKey(cAppPresentation), app
+      end If 
+
+    end If ' FilteredPatient and aSWProviders.Exists
+  Next
+end Sub
+
+Sub AddAppDuration(aAppLine, app)                         '========================
+  set aDict = aAppLine.GetCollection
+  aAppLine.AddSum app.Duration
+
+  aKey = GetApptPOSCode(app)
+  AddToColumnColl aDict, aKey, app.Duration 
+  If app.ProviderId > 0 then
+    aKey = app.ProviderCode
+    AddToColumnColl aDict, aKey, app.Duration 
+  End if
+  
+  set aPatient = app.Patient
+  If not (aPatient is nothing) then
+    aKey = GetPatientService(aPatient)
+    If not aMilServiceList.Exists(aKey) then
+      aMilServiceList.Add aKey, aPatient.ID
+    End if
+    AddToColumnColl aDict, aKey, app.Duration 
+    AddToColumnColl aDict, GetPatientGenderKey(aPatient), app.Duration
+    AddToColumnColl aDict, GetPatientEthnicityKey(aPatient), app.Duration
+  End if
+end Sub
+
+Sub AddAppNumber(aAppLine, app)                           '========================
+  set aDict = aAppLine.GetCollection
+  aAppLine.AddSum 1
+
+  aKey = GetApptPOSCode(app)
+  AddToColumnColl aDict, aKey, 1 
+  If app.ProviderId > 0 then
+    aKey = app.ProviderCode
+    AddToColumnColl aDict, aKey, 1 
+  End if
+  
+  set aPatient = app.Patient
+  If not (aPatient is nothing) then
+    aKey = GetPatientService(aPatient)
+    If not aMilServiceList.Exists(aKey) then
+      aMilServiceList.Add aKey, aPatient.ID
+    End if
+    AddToColumnColl aDict, aKey, 1 
+    AddToColumnColl aDict, GetPatientGenderKey(aPatient), 1
+    AddToColumnColl aDict, GetPatientEthnicityKey(aPatient), 1
+  End if
+end Sub
+
+Sub AddAppNumberPer(aAppLine, app, aKeyLine)              '========================
+  If app.PatientId = 0 then: Exit Sub
+  If app.ProviderId = 0 then: Exit Sub
+  set aDict = aAppLine.GetCollection
+  set aPatient = app.Patient
+
+  aKeyPatient = cStr(app.PatientId)              ' uniq For Patient Id
+  aKeyPOS = GetApptPOSCode(app)
+  aKeyService = GetPatientService(aPatient)
+  aKeyProv = app.ProviderCode
+
+  key = aKeyLine + ":" + aKeyPOS + ":" + aKeyPatient
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    AddToColumnColl aDict, aKeyPOS, 1 
+  End if
+
+  key = aKeyLine + ":" + aKeyProv + ":" + aKeyPatient
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    AddToColumnColl aDict, aKeyProv, 1 
+  End if
+
+  key = aKeyLine + ":" + aKeyService + ":" + aKeyPatient 
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    AddToColumnColl aDict, aKeyService, 1 
+  End if
+
+  aKeyGender = GetPatientGenderKey(aPatient)
+  key = aKeyLine + ":" + aKeyGender + ":" + aKeyPatient
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    AddToColumnColl aDict, aKeyGender, 1
+  End if
+
+  aKeyEth = GetPatientEthnicityKey(aPatient)
+  key = aKeyLine + ":" + aKeyEth + ":" + aKeyPatient
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    AddToColumnColl aDict, aKeyEth, 1
+  End if
+
+  key = aKeyLine + ":" + aKeyPatient
+  If not gPerUniq.Exists(key) then
+    gPerUniq.Add key, ""
+    aAppLine.AddSum 1 
+  End if
+end Sub
+
+Sub AddToColumnColl(aDict, aKey, aCount)              '========================= 
+  If aDict.Exists(aKey) then
+    aDict.Item(aKey) = aDict.Item(aKey) + aCount
+  else
+    aDict.Add aKey, aCount
+  End if
+end Sub
+
+Sub GenerateForCases(aList, aType, aDesc)                    '==================
+  vReport.AddLine
+  vReport.CurrentItem(cType) = aType
+  vReport.CurrentItem(cDataDetails) = aDesc
+  vReport.CurrentItem(cTotal) = 0
+  CollectStats aList
+end Sub
+
+Function GetApptPOSCode(aApp)                            '====================== 
+  GetApptPOSCode = "Unknown"
+  set aPOS = aApp.POS
+  If aPOS is nothing then: exit Function
+  GetApptPOSCode = aPOS.Code 
+End Function
+
+Function GetCaseServicePOSCode(aCase)                    '======================
+'Find the POS Code of the most recently open Case Service
+'Use Case Inital POS if there are none
+'stop
+    set aCSFilter = Profile.CreateCaseServiceFilter
+    aCSFilter.CaseId = aCase.Id
+    aCSFilter.OnlyOpened = True
+    set aCaseServices = Profile.LoadCaseServices(aCSFilter)
+    if aCaseServices.count = 0 then 
+        GetCaseServicePOSCode = GetCaseInitialPOSCode(aCase)
+    elseif aCaseServices.count = 1 then
+        set thisCaseService = aCaseServices.item(0)
+        GetCaseServicePOSCode = thisCaseService.PosCode
+    elseIf aCaseServices.count > 1 then
+          CaseServiceOpenDate = #01-Jan-1980# 
+          'Find most recently Open Case Service 
+          For i = 0 to aCaseServices.count - 1
+             set thisCaseService = aCaseServices.item(i)
+             if thisCaseService.Opened >  CaseServiceOpenDate then
+               GetCaseServicePOSCode = thisCaseService.PosCode   
+               CaseServiceOpenDate = thisCaseService.Opened
+           End if   
+          Next 
+    end if
+
+End Function
+
+Function GetCaseInitialPOSCode(aCase)                    '====================== 
+  GetCaseInitialPOSCode = "Unknown"
+  set aPOS = Profile.loadProvider(aCase.ServicePOSCode)
+  If aPOS is nothing then: exit Function
+  GetCaseInitialPOSCode = aPOS.Code 
+End Function
+
+Function GetCasePatientService(aCase)                   '======================= 
+' Resolve a case's patient's military service.
+' Uses LoadPatientCached to avoid re-loading the same patient across case lists.
+  GetCasePatientService = "Unknown"
+  If aCase.Patient is Nothing then: Exit Function
+  set aPatient = LoadPatientCached(aCase.Patient.Id)
+  If aPatient is nothing then: exit Function
+  GetCasePatientService = GetPatientService(aPatient) 
+End Function  
+
+Function GetAppPatientService(aApp)                      '====================== 
+  GetAppPatientService = "Unknown"
+  If aApp.Patient is nothing then: Exit Function 
+  set aPatient = Profile.loadPatient(aApp.Patient.Id)
+  If aPatient is nothing then: Exit Function
+  GetAppPatientService = GetPatientService(aPatient) 
+End Function  
+
+Function GetPatientService(aPatient)            '===============================
+  GetPatientService = ""
+  If aPatient is nothing then Exit Function
+  GetPatientService = aPatient.GetPatLabelName
+  If Instr(GetPatientService, "Reserve") > 0 then: GetPatientService = "Reserve Force"
+  If GetPatientService = "" then:  GetPatientService = "No service"
+End Function
+
+Function FilteredPatient(aPatient)               '==============================
+  FilteredPatient = False
+  If not aPatient is Nothing then
+    If UCase(aPatient.LastName) = "MOUSE" then: Exit Function  
+    If aPatient.GetPatLabelName = "DHS Patient" then: Exit Function  
+    If Instr(UCase(aPatient.LastName), "TEST") > 0 then: Exit Function
+    If Instr(UCase(aPatient.FirstNames), "TEST") > 0 then: Exit Function
+    If Instr(UCase(aPatient.FileNum), "TEST") > 0 then: Exit Function
+  End If
+  FilteredPatient = True
+End Function
+
+Function FilteredProvider(aEncounter)             '============================
+  FilteredProvider = aSWProviders.Exists(aEncounter.ProviderCode)  
+End Function
+
+Function FilteredEncounterCode(aCode)               '===========================
+  FilteredEncounterCode = inArray(arrExclude, aCode) < 0 
+End Function
+
+Sub LoadCasesAndPatientServices(aCasesList, aFilter)  '=========================
+'  Populate a Dictionary list For Cases and Patients
+  set aCasesCollection = Profile.LoadCases(aFilter)
+  For i = 0 to aCasesCollection.Count - 1
+    set aCase = aCasesCollection.Item(i)
+    set aPatient = aCase.Patient
+    If FilteredPatient(aPatient) then
+      If not aCasesList.Exists(aCase.ID) then: aCasesList.Add aCase.Id, aCase
+      If not aMilServiceList.Exists(GetPatientService(aPatient)) then
+        aMilServiceList.Add GetPatientService(aPatient), aPatient.ID
+      end If  
+    End If  
+  Next
+end Sub
+
+Sub LoadOpenCasesAsAt(aCasesList, aFilter, aAsAtDate)  '========================
+'  Populate a Dictionary list of Cases that were open as at aAsAtDate.
+'  A case is "open as at" aAsAtDate if it was opened on or before that date and
+'  either has no ClosedOn date set (ISCase.ClosedOn = 0) or was closed after that date.
+'  ISCase properties: OpenedOn and ClosedOn (TDateTime). A TDateTime of 0
+'  (= 30-Dec-1899) indicates the date has not been set.
+  set aCasesCollection = Profile.LoadCases(aFilter)
+  For i = 0 to aCasesCollection.Count - 1
+    set aCase = aCasesCollection.Item(i)
+    bStillOpen = True
+    If aCase.ClosedOn > 0 then
+      If aCase.ClosedOn <= aAsAtDate then: bStillOpen = False
+    End if
+    If bStillOpen then
+      set aPatient = aCase.Patient
+      If FilteredPatient(aPatient) then
+        If not aCasesList.Exists(aCase.ID) then: aCasesList.Add aCase.Id, aCase
+        If not aMilServiceList.Exists(GetPatientService(aPatient)) then
+          aMilServiceList.Add GetPatientService(aPatient), aPatient.ID
+        end If
+      End if
+    End if
+  Next
+end Sub
+
+Function SocialWorkerEncounters(aEncFilter)'           =========================
+ 'Get Encounters for SW Providers only 
+ 
+  set SocialWorkerEncounters = Profile.CreateList
+  For i = 0 to aSWProviders.count - 1  
+    Set thisProv =  aSWProviders.Items()(i)
+    aEncFilter.ProviderCode = thisProv.Code
+    set aEncounters = Profile.LoadEncounters(aEncFilter)
+    for j = 0 to aEncounters.count - 1
+      SocialWorkerEncounters.Add(aEncounters.Item(j))
+    Next 'j
+  Next 'i  
+End Function
+
+Function GetPatientGenderKey(aPatient)           '==============================
+' Map Patient.Sex to a fixed Gender bucket key. Empty/unknown/other codes go to
+' the Gender Diverse bucket per spec.
+' Memoised per patient in gGenderCache to avoid repeated COM reads of .Sex.
+  GetPatientGenderKey = cGenderDiverse
+  If aPatient is Nothing then: Exit Function
+  aCacheKey = cStr(aPatient.Id)
+  If gGenderCache.Exists(aCacheKey) then
+    GetPatientGenderKey = gGenderCache.Item(aCacheKey)
+    Exit Function
+  End if
+  aSex = UCase(aPatient.Sex)
+  If aSex = "M" then
+    GetPatientGenderKey = cGenderMale
+  ElseIf aSex = "F" then
+    GetPatientGenderKey = cGenderFemale
+  End if
+  gGenderCache.Add aCacheKey, GetPatientGenderKey
+End Function
+
+Function GetPatientEthnicityKey(aPatient)        '==============================
+' Map a patient's 1..6 ethnicity codes to a single prioritised bucket per spec:
+'   Maori(21) > Pasifika(30..37) > Other (any non-Pakeha, non-listed) > Pakeha(11)
+' Strict interpretation: any code not exactly in {11, 21, 30-37} counts as Other.
+' Memoised per patient in gEthCache to avoid repeated COM reads of all 6 codes.
+  Dim aCodes(5), hasMaori, hasPasifika, hasOther, hasPakeha, i
+  GetPatientEthnicityKey = cEthOther
+  If aPatient is Nothing then: Exit Function
+  aCacheKey = cStr(aPatient.Id)
+  If gEthCache.Exists(aCacheKey) then
+    GetPatientEthnicityKey = gEthCache.Item(aCacheKey)
+    Exit Function
+  End if
+
+  aCodes(0) = aPatient.EthnicityCode
+  aCodes(1) = aPatient.EthnicityCode2
+  aCodes(2) = aPatient.EthnicityCode3
+  aCodes(3) = aPatient.EthnicityCode4
+  aCodes(4) = aPatient.EthnicityCode5
+  aCodes(5) = aPatient.EthnicityCode6
+
+  hasMaori = False : hasPasifika = False : hasOther = False : hasPakeha = False
+  For i = 0 To 5
+    aCode = Trim(aCodes(i))
+    If aCode <> "" then
+      If aCode = cEthCodeMaori then
+        hasMaori = True
+      ElseIf aCode = cEthCodePakeha then
+        hasPakeha = True
+      ElseIf InArray(aPasifikaCodes, aCode) >= 0 then
+        hasPasifika = True
+      Else
+        hasOther = True
+      End if
+    End if
+  Next
+
+  ' Priority selection
+  If hasMaori then
+    GetPatientEthnicityKey = cEthMaori
+  ElseIf hasPasifika then
+    GetPatientEthnicityKey = cEthPasifika
+  ElseIf hasOther then
+    GetPatientEthnicityKey = cEthOther
+  ElseIf hasPakeha then
+    GetPatientEthnicityKey = cEthPakeha
+  ' else: no codes at all -> cEthOther (initial value)
+  End if
+  gEthCache.Add aCacheKey, GetPatientEthnicityKey
+End Function
+
+Function LoadPatientCached(aPatientId)           '==============================
+' Cached wrapper around Profile.LoadPatient to avoid repeated DB hits for the
+' same patient across the encounter loops. Returns Nothing if the Id is 0.
+  Set LoadPatientCached = Nothing
+  If aPatientId = 0 then: Exit Function
+  aKey = cStr(aPatientId)
+  If gPatientCache.Exists(aKey) then
+    Set LoadPatientCached = gPatientCache.Item(aKey)
+  else
+    set aPatient = Profile.LoadPatient(aPatientId)
+    gPatientCache.Add aKey, aPatient
+    Set LoadPatientCached = aPatient
+  End if
+End Function
+
+Function ConvertDate(aString)                    '==============================
+  If isDate(aString) then
+    D1 = CDate(aString) 
+    YYYY = DatePart("yyyy",D1)
+    MM = Right("0" & DatePart("m", D1), 2)
+    DD = Right("0" & DatePart("d", D1), 2)
+    ConvertDate = DD & "/" & MM &  "/" & YYYY
+  End if
+End Function
+
+Function getCount(Value)                         '==============================
+  getCount = 0
+  If IsEmpty(Value) or IsNull(Value) Then: Exit Function
+  If IsObject(Value) Then
+    If Value Is Nothing Then: Exit Function
+  End if
+  getCount = Value.Count
+End Function
+
+Function ConvertToHours(minutes)   ' Convert minutes to hours '=================
+    ' Round to the nearest half hour using standard rounding
+  roundedHours = Round(2 * minutes / 60) / 2
+  If roundedHours > 0 then
+    ConvertToHours = FormatNumber(roundedHours, 1) 'Format the result as a decimal with one decimal place
+  else
+    ConvertToHours = "0"
+  End if
+End Function
+
+Function InArray(aArr, aValue)                      '===========================
+  InArray = -1
+
+  For i = LBound(aArr) To UBound(aArr)
+    If Trim(aArr(i)) = aValue Then
+      InArray = i
+      Exit Function
+    End if
+  Next
+End Function
+
+'''''''''''''''''''''''''''''''''''''''''''''''
+Class InternalLine        ' DiagCode, DiagDesc, Sum, Collection - (Column header, Count)
+
+  ' fDict contains counts (of appointments, patients or cetera) per POS, per provider, or per military service
+  ' fMergedDict contains same counts but (for encounters only) merging diag code with its review code
+  ' fSum and fMergedSum are totals of their respective dictionaries
+  Private fDict, fMergedDict, fSum, fMergedSum
+  Public Code, Description
+
+  Public Sub Init()
+    Set fDict = CreateObject("Scripting.Dictionary")
+    Set fMergedDict = CreateObject("Scripting.Dictionary")
+    fSum = 0
+    fMergedSum = 0  ' i.e. combined count of main diagnosis and its review diagnosis
+  end Sub
+
+  Public Function GetCollection()
+    set GetCollection = fDict
+  End Function
+
+  Public Function GetMergedCollection()
+    set GetMergedCollection = fMergedDict
+  End Function
+
+  Public Sub AddSum(i)
+    fSum = fSum + i
+  end Sub
+
+  Public Function GetSum()
+    GetSum = fSum
+  End Function
+
+  Public Sub AddMergedSum(i)
+    fMergedSum = fMergedSum + i
+  end Sub
+
+  Public Function GetMergedSum()
+    GetMergedSum = fMergedSum
+  End Function
+
+  Public Sub Assign(aLine)
+    Init()
+    SumAll(aLine)
+  End Sub
+
+  Public Sub SumAll(aLine)
+    Set aDict = aLine.GetCollection
+    For i = 0 to aDict.Count -1
+      key = aDict.Keys()(i)
+      cnt = aDict.Items()(i)
+      AddToColumnColl fDict, key, cnt
+    Next
+    Set aDict = aLine.GetMergedCollection
+    For i = 0 to aDict.Count -1
+      key = aDict.Keys()(i)
+      cnt = aDict.Items()(i)
+      AddToColumnColl fMergedDict, key, cnt
+    Next
+    AddSum aLine.GetSum
+    AddMergedSum aLine.GetMergedSum	
+  end Sub
+End Class
+
+'''''''''''''''''''''''''''''''''''''''''''''''
+Class InternalLines            ' Diag, Internal Line
+
+  Private fDict, arrSorted()
+  Private sortedArr()
+ 
+  Public Sub Init()
+    Set fDict = CreateObject("Scripting.Dictionary")
+  end Sub
+
+  Public Function Add(key, aDesc)
+    set aInternalLine = new InternalLine
+    aInternalLine.Init()
+    fDict.Add key, aInternalLine
+    aInternalLine.Description = aDesc
+    aInternalLine.Code = key
+    Set Add = aInternalLine
+  End Function
+
+  Public Function IsExist(aKey)
+    IsExist = fDict.Exists(aKey)
+  End Function
+
+  Public Function ItemCount()
+    ItemCount = fDict.Count
+  End Function
+
+  Public Function GetItemByKey(aKey)
+    set GetItemByKey = fDict.Item(aKey)
+  End Function
+
+ Public Function GetItem(aInd)
+    aItems = fDict.Items
+    Set GetItem = aItems(aInd)
+  End Function
+
+  Public Sub SortByDesc(aSkip)
+    aItems = fDict.Items
+
+    ' Create an array to hold "InternalLine" objects and their descriptions
+    ReDim sortedArr(fDict.Count - aSkip - 1, 1)
+
+    ' Copy "InternalLine" objects and their descriptions to the new array
+    For i = 0 To fDict.Count - aSkip - 1
+      Set sortedArr(i, 0) = aItems(i + aSkip) ' Store the "InternalLine" object
+      sortedArr(i, 1) = aItems(i + aSkip).Description ' Store the description
+    Next
+
+    ' Sort the array based on the "Description" property
+    BubbleSortByDescription sortedArr
+  End sub
+
+  Private Sub BubbleSortByDescription(ByRef arr)
+    For i = UBound(arr) - 1 To 0 Step -1
+      For j = 0 To i
+        If arr(j, 1) > arr(j + 1, 1) Then           ' Swap the "InternalLine" objects
+          Set temp = arr(j, 0)
+          Set arr(j, 0) = arr(j + 1, 0)
+          Set arr(j + 1, 0) = temp
+          tempDesc = arr(j, 1) : arr(j, 1) = arr(j + 1, 1) : arr(j + 1, 1) = tempDesc
+        End if
+      Next
+    Next
+  End sub
+
+  Public Function GetSortedItem(aInd)
+    If aInd >= LBound(sortedArr) And aInd <= UBound(sortedArr) Then
+      Set GetSortedItem = sortedArr(aInd, 0)
+    End if
+  End Function
+
+End Class
+''''''''''''''''''''''''''''''''''''''''''''
+Class VirtualReport          ' Diag - ReportLine
+    Private dict
+
+    Public Sub Init()
+        Set dict = CreateObject("Scripting.Dictionary")
+    end Sub
+
+    Public Property Get CurrentItem(key)
+        Dim arr
+        arr = dict.Item(key)
+        CurrentItem = arr(UBound(arr))
+    End Property
+
+    Public Property Let CurrentItem(key, value)
+        arr = dict.Item(key)
+        arr(UBound(arr)) = value
+        dict.Item(key) = arr
+    End Property
+
+    Public Property Get ItemValue(key, aInd)
+        ItemValue = ""
+        Dim arr
+        arr = dict.Item(key)
+        If not IsEmpty(arr) then
+          If UBound(arr) >= aInd then
+            ItemValue = arr(aInd)
+          End if
+        End if
+    End Property
+
+    Public Property Get Item(key)
+        Item = dict.Item(key)
+    End Property
+
+    Public Sub AddItem(key)
+        Dim arr() 
+        ReDim arr(0)
+        arr(0) = 0
+        dict.Add key, arr
+    end Sub
+
+    Public Sub RemoveItem(key)
+        dict.Remove key
+    end Sub
+
+    Public Sub AddLine()
+      Dim key, arr                      
+      For Each key In dict.Keys
+        arr = dict.Item(key)  
+        i = UBound(arr) + 1
+        ReDim Preserve arr(i)
+        If key = cType or key = cDataDetails then 
+          arr(i) = ""
+        else
+          arr(i) = 0
+        End if
+        dict.Item(key) = arr
+      Next
+    end Sub
+
+    Public Function IsEmptyArray(key)
+        Dim arr
+        arr = dict.Item(key)                                 
+        For i = LBound(arr) To UBound(arr)
+            If Not IsEmpty(arr(i)) And arr(i) <> 0 Then
+                IsEmptyArray = False
+                Exit Function
+            End if
+        Next
+        IsEmptyArray = True
+    End Function
+
+    Public Sub DeleteItem(key)
+      dict.Remove key
+    end Sub
+End Class
