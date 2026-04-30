@@ -8,21 +8,18 @@ Layout strategy:
   - 9 input controls overlaid on top:
         - Name fields:      TICDOEdit, 250x22, x=200
         - Signature fields: TICDOSignature, 250x22, x=200
-        - Date fields:      TICDOEdit with EditType=edtyDate, 150x22,
-                            sitting to the right of each Signature
-                            (matching the original PDF layout)
+        - Date fields:      TICDOEdit with EditType=edtyDate, 150x22, x=560
+                            (right of Signature, matching original PDF layout)
   - No HRIs in this layout-only first pass; data-binding deferred until
     visual round-trip is validated and the layout is final.
 
 Coordinate calibration:
-  Initial guesses for control positions were drifted slightly low (controls
-  sat below their labels with too much gap) and used different x-alignment
-  for Date fields. After importing into Profile and adjusting in the form
-  designer, the calibrated positions below were exported back to JFA and
-  baked in here verbatim. Note the small per-row variance in Date x-positions
-  (560/565/575) and y-positions (738/834/931) — this reflects manual
-  pixel-nudging in the designer rather than a programmatic alignment, and
-  is preserved as-is.
+  Initial guesses for control positions drifted ~18-20 px low (controls
+  sat below their labels with too much gap). After importing into Profile
+  and adjusting in the form designer, the calibrated positions below were
+  exported back to JFA and baked in here. Date x-positions had per-row
+  micro-variance (560/565/575) from manual nudging; standardised to 560
+  across all rows for consistency.
 
 Concept:    z..UB
 Folder:     NZDF (verbatim from minimal-sample fixture)
@@ -86,8 +83,8 @@ def build_layout(form_def_id: int = 90000010,
         proportional=False,
     ))
 
-    # Calibrated control positions (pixel coordinates from manual designer
-    # adjustment; see module docstring for context).
+    # Calibrated control positions. Names + Signatures share x=200, w=250.
+    # Dates share x=560, w=150. Y values from manual designer adjustment.
     # Format: (name, factory, x, y, w, h)
     controls = [
         ('edtClientName',    Edit,      200, 692, 250, 22),
@@ -95,10 +92,10 @@ def build_layout(form_def_id: int = 90000010,
         ('edtClientSigDate', DateEdit,  560, 738, 150, 22),
         ('edtChapName',      Edit,      200, 787, 250, 22),
         ('edtChapSig',       Signature, 200, 835, 250, 22),
-        ('edtChapSigDate',   DateEdit,  565, 834, 150, 22),
+        ('edtChapSigDate',   DateEdit,  560, 834, 150, 22),
         ('edtClinName',      Edit,      200, 885, 250, 22),
         ('edtClinSig',       Signature, 200, 935, 250, 22),
-        ('edtClinSigDate',   DateEdit,  575, 931, 150, 22),
+        ('edtClinSigDate',   DateEdit,  560, 931, 150, 22),
     ]
     for tab, (name, cls, x, y, w, h) in enumerate(controls):
         layout.add(cls(
