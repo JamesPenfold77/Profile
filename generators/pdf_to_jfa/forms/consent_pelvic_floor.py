@@ -1,19 +1,28 @@
 """
 Consent for Pelvic Floor Muscle Evaluation and Treatment.
 
-Layout strategy (per Path B decision):
+Layout strategy:
   - Page background: rasterized PDF at 96 DPI with 10 regions masked white
     (page-number "1" + 9 underscore lines for Names/Signatures/Dates).
-  - Background embedded as a single full-canvas TICDOImage.
-  - 9 input controls overlaid on top, all 250 x 22 px, all left-aligned at
-    x=132, sitting immediately below their respective labels:
-        Names: TICDOEdit
-        Signatures: TICDOSignature
-        Dates: TICDOEdit with EditType=edtyDate / EditKind=edkdDate
-    Date controls stack BELOW their Signature counterparts. This is a
-    deliberate UX choice — accepting some overlap with the next group's
-    Name label area to keep all controls left-aligned.
-  - No HRIs (layout-only first pass; data-binding deferred).
+    Embedded as a single full-canvas TICDOImage at (0,0).
+  - 9 input controls overlaid on top:
+        - Name fields:      TICDOEdit, 250x22, x=200
+        - Signature fields: TICDOSignature, 250x22, x=200
+        - Date fields:      TICDOEdit with EditType=edtyDate, 150x22,
+                            sitting to the right of each Signature
+                            (matching the original PDF layout)
+  - No HRIs in this layout-only first pass; data-binding deferred until
+    visual round-trip is validated and the layout is final.
+
+Coordinate calibration:
+  Initial guesses for control positions were drifted slightly low (controls
+  sat below their labels with too much gap) and used different x-alignment
+  for Date fields. After importing into Profile and adjusting in the form
+  designer, the calibrated positions below were exported back to JFA and
+  baked in here verbatim. Note the small per-row variance in Date x-positions
+  (560/565/575) and y-positions (738/834/931) — this reflects manual
+  pixel-nudging in the designer rather than a programmatic alignment, and
+  is preserved as-is.
 
 Concept:    z..UB
 Folder:     NZDF (verbatim from minimal-sample fixture)
@@ -28,15 +37,13 @@ from ..layout import (
 
 
 # Page image dimensions (PDF rasterized at 96 DPI; A4 = 595.32 x 841.92 pt
-# rounds to 794 x 1123 px at 96 DPI).
+# rounds to 794 x 1123 px at 96 DPI). Note: the calibrated DFM uses a slightly
+# wider notebook (820) to match the client viewport width — this avoids a
+# narrow column of empty space on the right edge of the visible canvas.
 PAGE_W = 794
 PAGE_H = 1123
-
-# Input control geometry — all left-aligned, fixed size.
-EDIT_X = 132
-EDIT_W = 250
-EDIT_H = 22
-
+NOTEBOOK_W = 820   # post-calibration: matches client_width
+NOTEBOOK_H = 1123
 
 # Path to the masked background PNG. Resolved relative to this file so the
 # generator works regardless of the working directory.
@@ -49,7 +56,7 @@ def build_layout(form_def_id: int = 90000010,
     """Construct the FormLayout for the Pelvic Floor consent form.
 
     Args:
-        form_def_id: synthetic OBSV [3] for the 100502 row (Profile remaps).
+        form_def_id:     synthetic OBSV [3] for the 100502 row (Profile remaps).
         background_path: PNG to embed. Defaults to the bundled masked image
                          at assets/pelvic_floor_background.png.
     """
@@ -62,15 +69,15 @@ def build_layout(form_def_id: int = 90000010,
         concept_display_name='Consent for Pelvic Floor Muscle Evaluation and Treatment',
         folder_category='NZDF',
         form_def_id=form_def_id,
-        # Visible viewport — A4-ish portrait for screen viewing
+        # Visible viewport — A4-ish portrait for screen viewing.
         client_width=820,
         client_height=620,
-        # NoteBook canvas matches the page image exactly
-        notebook_width=PAGE_W,
-        notebook_height=PAGE_H,
+        # NoteBook canvas: width matches client; height matches page image.
+        notebook_width=NOTEBOOK_W,
+        notebook_height=NOTEBOOK_H,
     )
 
-    # Full-page background image (covers the entire panel).
+    # Full-page background image (image is exactly PAGE_W x PAGE_H px).
     layout.add(Image(
         name='imgBackground',
         rect=Rect(0, 0, PAGE_W, PAGE_H),
@@ -79,25 +86,25 @@ def build_layout(form_def_id: int = 90000010,
         proportional=False,
     ))
 
-    # 9 input controls, top-down. Tab order matches reading order.
-    # Coordinates are pre-computed to sit just below each label in the image.
+    # Calibrated control positions (pixel coordinates from manual designer
+    # adjustment; see module docstring for context).
+    # Format: (name, factory, x, y, w, h)
     controls = [
-        ('edtClientName',     710, Edit),
-        ('edtClientSig',      759, Signature),
-        ('edtClientSigDate',  783, DateEdit),
-        ('edtChapName',       807, Edit),
-        ('edtChapSig',        855, Signature),
-        ('edtChapSigDate',    879, DateEdit),
-        ('edtClinName',       904, Edit),
-        ('edtClinSig',        952, Signature),
-        ('edtClinSigDate',    976, DateEdit),
+        ('edtClientName',    Edit,      200, 692, 250, 22),
+        ('edtClientSig',     Signature, 200, 740, 250, 22),
+        ('edtClientSigDate', DateEdit,  560, 738, 150, 22),
+        ('edtChapName',      Edit,      200, 787, 250, 22),
+        ('edtChapSig',       Signature, 200, 835, 250, 22),
+        ('edtChapSigDate',   DateEdit,  565, 834, 150, 22),
+        ('edtClinName',      Edit,      200, 885, 250, 22),
+        ('edtClinSig',       Signature, 200, 935, 250, 22),
+        ('edtClinSigDate',   DateEdit,  575, 931, 150, 22),
     ]
-    for tab, (name, y, cls) in enumerate(controls):
-        item = cls(
+    for tab, (name, cls, x, y, w, h) in enumerate(controls):
+        layout.add(cls(
             name=name,
-            rect=Rect(EDIT_X, y, EDIT_W, EDIT_H),
+            rect=Rect(x, y, w, h),
             tab_order=tab,
-        )
-        layout.add(item)
+        ))
 
     return layout
