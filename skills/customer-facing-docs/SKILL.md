@@ -1,6 +1,6 @@
 ---
 name: customer-facing-docs
-description: "Use this skill whenever a customer-facing Word document needs to be generated against the Intrahealth corporate template. Triggers include: 'customer-facing doc', 'doc I can share with customer', 'using the Intrahealth template', any .docx output intended for a customer, partner, or external audience. The skill defines the canonical approach — inject content into the template's own styles rather than applying custom styling via docx-js — and requires the template file to be attached to the conversation."
+description: "Use this skill whenever a customer-facing Word document needs to be generated against the Intrahealth corporate template. Triggers include: 'customer-facing doc', 'doc I can share with customer', 'using the Intrahealth template', any .docx output intended for a customer, partner, or external audience. The skill defines the canonical approach — inject content into the template's own styles rather than applying custom styling via docx-js — and requires the template file to be available either from the JamesPenfold77/Profile repo (canonical) or attached to the conversation."
 ---
 
 # Customer-Facing Documents – Intrahealth Template Skill
@@ -9,14 +9,23 @@ description: "Use this skill whenever a customer-facing Word document needs to b
 
 This skill produces customer-facing `.docx` deliverables (overviews, functional summaries, integration briefs, proposals) that use the **Intrahealth corporate template** directly. The template carries the letterhead, logo, fonts, colour palette, heading styles, table styles, and footer binding — so the output looks identical to anything else produced from that template.
 
-The key principle: **never rebuild the branding in code**. Take the actual template file the user provides, unpack it, replace the body content while preserving its styles, and repack. Do not try to approximate the template with docx-js style overrides — the result will always drift.
+The key principle: **never rebuild the branding in code**. Take the actual template file, unpack it, replace the body content while preserving its styles, and repack. Do not try to approximate the template with docx-js style overrides — the result will always drift.
+
+A second, equally important principle: **never invent Profile functional behaviour**. The Profile source is accessible; read it before describing how anything in Profile actually works. See pre-requisite 2 below.
 
 ---
 
 ## Pre-requisites
 
-1. **The template file must be attached to the conversation.** If it is not, stop and ask the user to attach it. Do not fall back to a generic Arial/plain-styled doc — producing something that looks "close to" the template is worse than asking.
-2. The `docx` skill at `/mnt/skills/public/docx/SKILL.md` must be read first — it documents `unpack.py`, `pack.py`, and `validate.py` which this skill relies on.
+1. **The Intrahealth template must be available.** Canonical source is `docs/Intrahealth Document Template.docx` in the JamesPenfold77/Profile repo — fetch it via the GitHub connector at the start of the task. If the connector is unavailable or returns garbled bytes (a known issue with binary content over the MCP wrapper), ask the user to attach the template and stop until they do. Do not fall back to a generic Arial/plain-styled doc — producing something that looks "close to" the template is worse than asking.
+
+2. **For Profile functional behaviour, ground the doc in the Profile source.** Whenever the doc describes how a Profile interface, integration, feature or workflow actually works, read the source before writing. Profile source lives at `intrahealth-source/profile` (GitHub) — connect via the GitHub MCP and start at `docs/Integrations/eMessages/` for any integration topic, then drill into the relevant setup form (`Profile/Client/Interface/UIRSD*.pas`) and the message-type catalogue (`Profile/Common/Business/UBRSDTypes.pas`, `Profile/Common/Business/UBEMessageService.pas`). For integrations that are *not* in the eMessages catalogue (e.g. anything launched as an HTML View, like BPAC eForms), check `Profile/Common/Infrastructure/UStdHTMLViews.pas` and `Profile/Client/Interface/UIHTMLViewsSetup.pas`. Do not write from priors and offer to verify later — verify first, write second.
+
+   The repo also contains internal customer-facing setup PDFs alongside the integration docs which are useful secondary sources. If the user provides a setup guide or other Intrahealth document for the topic, treat that as primary truth; corroborate against the source for anything beyond what it covers.
+
+   If the source has been read and an unverified claim is still needed (e.g. retry intervals, status names, identifiers), explicitly mark it in the draft as needing user confirmation rather than stating it confidently. A document that flags two open questions is honest; a document that confidently invents details a customer architect will design against is a liability.
+
+3. The `docx` skill at `/mnt/skills/public/docx/SKILL.md` must be read first — it documents `unpack.py`, `pack.py`, and `validate.py` which this skill relies on.
 
 ---
 
@@ -163,17 +172,19 @@ Every customer-facing doc should have, at minimum:
 
 ## Failure Modes to Avoid
 
-- **Rebuilding the template in docx-js.** Tempting when the user hasn't attached the file yet, but the output will never quite match the real template and will be visually inconsistent with other Intrahealth docs. Always ask for the template instead.
+- **Writing functional behaviour from priors instead of source.** Plausible-sounding but invented status names, retry intervals, message formats, transport mechanisms, or identifiers will read as authoritative to a customer architect and may be designed against. If the integration is in Profile's eMessages catalogue, the answer is in `UBRSDTypes.pas` and the relevant setup form — read them first. If the integration is *not* in the eMessages catalogue (e.g. BPAC eForms, which uses HTML Views), do not assume it doesn't exist; check `UStdHTMLViews.pas`, `UIHTMLViewsSetup.pas`, and any setup guide the user provides. When in doubt, mark a claim as needing user confirmation rather than asserting it.
+- **Rebuilding the template in docx-js.** Tempting when the template isn't available yet, but the output will never quite match the real template and will be visually inconsistent with other Intrahealth docs. Always fetch from the repo or ask for the template instead.
 - **Using `Subtitle` (no hyphen) when the template defines `Sub-Title` (with hyphen).** The built-in `Subtitle` style exists alongside the custom one and will render differently. Verify by grepping `styles.xml`.
 - **Forgetting to update `dc:title` in `core.xml`.** The footer will keep saying "Document Title" because it's bound to that field.
 - **Setting `w:lastRow="1"` on tables with more than one data row.** `PlainTable11` will bold the final data row, which looks like a typo to the reader.
 - **Replacing the entire `<w:body>` contents including `<w:sectPr>`.** The document will lose its page size, margins, header/footer references, and orientation.
-- **Producing a "plain styled" fallback when the template isn't attached.** Don't. Ask for the template.
+- **Producing a "plain styled" fallback when the template isn't available.** Don't. Fetch from the repo or ask the user.
 
 ---
 
 ## Notes
 
-- Source template: uploaded by the user per session. Do not hardcode a template path; the template evolves.
-- Template as of April 2026: `Intrahealth_Document_Template.docx` — uses `Title`, `Sub-Title`, `Heading1/2/3`, `BodyBullet`, `PlainTable11`; footer binds to `dc:title` via structured document tag.
+- Canonical template location: `docs/Intrahealth Document Template.docx` in JamesPenfold77/Profile (note spaces in filename). Fetch via GitHub connector at the start of any task.
+- Profile source: `intrahealth-source/profile` on GitHub. Integration documentation lives under `docs/Integrations/`, with eMessages-specific docs at `docs/Integrations/eMessages/`. The eMessages catalogue defines 109 message types — most Profile integrations are one of these. HTML Views (used by BPAC eForms and a small number of other UI-embedded integrations) are a separate mechanism, not part of the eMessages framework.
+- Template as of April 2026: uses `Title`, `Sub-Title`, `Heading1/2/3`, `BodyBullet`, `PlainTable11`; footer binds to `dc:title` via structured document tag.
 - If the template changes (new styles, new footer binding, new logo), re-discover style IDs via `grep -E 'w:styleId='` before writing content. Don't assume last session's style names still apply.
