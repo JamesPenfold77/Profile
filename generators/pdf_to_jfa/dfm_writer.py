@@ -65,6 +65,8 @@ def _emit_label(b: _Buf, item: Label) -> None:
     b.line(5, f'Top = {int(r.y)}')
     b.line(5, f'Width = {int(r.w)}')
     b.line(5, f'Height = {int(r.h)}')
+    if not item.auto_size:
+        b.line(5, 'AutoSize = False')
     b.line(5, f'Caption = {_quote(item.text)}')
     if item.bold or item.italic:
         styles = []
@@ -77,6 +79,8 @@ def _emit_label(b: _Buf, item: Label) -> None:
         b.line(5, f'Font.Size = {item.font_size}')
         b.line(5, f'Font.Style = [{", ".join(styles)}]')
         b.line(5, 'ParentFont = False')
+    if item.word_wrap:
+        b.line(5, 'WordWrap = True')
     b.line(5, 'TechTranslation = False')
     b.line(5, 'Modified = True')
     b.line(4, 'end')
