@@ -53,11 +53,12 @@ MASK_REGIONS_PT = [
     ( 65.5, 246.0, 530.0, 303.0, 0, 0, 0, 0, 'procedure blank'),
 
     # ===== Cell 7 (lower text + signatures): =====
-    # Two checkbox rectangles at start of "I note..." (y=504.8) and "I fully understand..."
-    # (y=529.3) rows. The boxes are drawn as small Word table cells with a tight border.
-    # First "I" of each line starts at x=74.3, so checkbox right edge must stay <= 73.
-    ( 65.5, 502.0,  72.5, 517.0, 0, 0, 0, 0, 'checkbox 1 (under-16)'),
-    ( 65.5, 526.0,  72.5, 541.0, 0, 0, 0, 0, 'checkbox 2 (student)'),
+    # "Where applicable:" panel — italic header at y_pt≈482, two checkbox rows
+    # spanning y_pt≈501..540. Wipe the whole block (cell border just below
+    # the foot-image cell at y≈480 down to the horizontal divider above
+    # "I consent to the administration..." at y≈555). Native controls
+    # (italic Label + 2× CheckBox + 2× wrapping Label) replace the content.
+    ( 60.0, 480.0, 540.0, 555.0, 0, 0, 0, 0, 'Where applicable: panel (entire)'),
 
     # Patient Signed/Date row: labels "Signed:" (ends 94.8), "Date:" (starts 339.8, ends 361.7).
     # Underline is at PDF y_pt = 666 (bottom of the cell row). Mask must include the line itself.
