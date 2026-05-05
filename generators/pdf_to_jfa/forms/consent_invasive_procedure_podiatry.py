@@ -3,9 +3,10 @@ Client Consent for Invasive Procedure (Podiatry) — NWRH Form 4023J.
 
 Layout strategy:
   - Page background: rasterized PDF at 96 DPI with mask regions painted
-    white over the example "04/09/21" date in the source, the blank
-    fillable cell-line spaces, and the two on-page checkbox boxes.
-    Embedded as a single full-canvas TICDOImage at (0,0).
+    white over (a) the example "04/09/21" date in the source, (b) the
+    blank fillable cell-line spaces, and (c) the entire "Where applicable:"
+    panel (italic header + 2 checkbox rows + their text). Embedded as a
+    single full-canvas TICDOImage at (0,0).
   - 3x TISliceImageEditor controls overlaid on the foot-diagram strip —
     one per panel (Plain anatomical / Dorsal / Plantar). The slice editor
     lets the podiatrist mark up the foot diagrams ("indicate area of
@@ -23,11 +24,14 @@ Layout strategy:
         * Podiatrist name in block letters (bottom row, left column)
   - 1x TICDOMemo for the procedure description (multi-line area above
     "(state procedure precisely)" caption).
-  - 2x TICDOCheckBox (under-16 supervision; student under direction).
+  - 2x TICDOCheckBox + 2x TICDOLabel (wrapping) + 1x TICDOLabel (italic
+    header) — replacing the entire "Where applicable:" panel from the
+    source PDF (mask blanks the whole panel; native controls render text
+    + checkboxes with proper alignment).
   - 3x TICDOEdit-as-date (patient signature date, witness date,
     podiatrist signature date).
 
-  Total: 1 background image + 3 slice editors + 12 input controls.
+  Total: 1 background image + 3 slice editors + 15 input/label items.
 
 Coordinate calibration:
   First-pass coordinates derived from PDF point positions (extracted via
@@ -45,7 +49,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..layout import (
-    FormLayout, Rect, Image, Edit, DateEdit, Memo, Signature, CheckBox,
+    FormLayout, Rect, Image, Label, Edit, DateEdit, Memo, Signature, CheckBox,
     SliceImageEditor,
 )
 
@@ -99,9 +103,9 @@ def build_layout(form_def_id: int = 90000020,
 
     # Full-page background image. The image is exactly PAGE_W x PAGE_H px and
     # already includes everything except: the example date, the cell underlines
-    # for input fields, and the two checkbox squares (all painted white by the
-    # mask). The foot diagrams ARE in the background — slice editors below sit
-    # transparently on top of them.
+    # for input fields, and the entire Where-applicable panel (all painted white
+    # by the mask). The foot diagrams ARE in the background — slice editors
+    # below sit transparently on top of them.
     layout.add(Image(
         name='imgBackground',
         rect=Rect(0, 0, PAGE_W, PAGE_H),
@@ -119,13 +123,15 @@ def build_layout(form_def_id: int = 90000020,
     #   Panel 1 (Plain feet, R/L):    x_px=87..376  → x_pt=65..282
     #   Panel 2 (Dorsal feet, R/L):   x_px=376..553 → x_pt=282..415
     #   Panel 3 (Plantar feet, R/L):  x_px=553..714 → x_pt=415..535
-    # Vertical extent of foot drawings: y_pt≈330..445 (above the R/L labels
-    # at y_pt≈445..455 and "Dorsal"/"Plantar" labels at y_pt≈460..470).
-    # Slice editors should cover the drawing area so the podiatrist can mark
-    # on the feet without overlapping the labels below.
+    # First-pass (y_pt=330..445) put the editors over empty space at the top
+    # of the cell — the foot drawings actually start at y_pt≈360 and end
+    # around y_pt≈455 (above the R/L caption labels at y_pt≈456..466 and
+    # the "Dorsal"/"Plantar" labels at y_pt≈460..470).
+    # Calibrated after first import showed slice editors were ~30 pt too
+    # high; corrected here.
     # ============================================================
-    SLICE_Y = _pt(330)   # top of foot drawings
-    SLICE_H = _pt(115)   # cover drawings, leave 10pt above R/L labels
+    SLICE_Y = _pt(360)   # top of foot drawings (was 330, 30pt too high)
+    SLICE_H = _pt(95)    # cover drawings, leave clearance above R/L labels
 
     layout.add(SliceImageEditor(
         name='sliceFeetPlain',
@@ -186,24 +192,70 @@ def build_layout(form_def_id: int = 90000020,
     ))
 
     # ============================================================
-    # "Where applicable:" checkboxes (cell 7, upper)
-    # The on-page checkbox squares are at the start of each text row.
-    # First "I" of each row is at x_pt=74.3, so checkboxes sit at x_pt≈66..73,
-    # row y_pts: 504.8 (under-16) and 529.3 (student).
-    # CheckBox controls without captions (the on-page text is in the
-    # background image and reads correctly without a duplicate caption).
+    # "Where applicable:" panel — replaces the entire on-page panel
+    # (italic header + 2 checkbox rows + their text) with native controls.
+    # The background mask covers PDF y_pt=480..555 across the full cell
+    # width, so this whole region is clean white.
+    #
+    # First import attempt overlaid TICDOCheckBox controls over the source
+    # PDF's Word-table-cell checkbox squares. The leading "I" of "I note..."
+    # was being clipped by the right edge of the on-page checkbox cell — no
+    # alignment of mask + control kept both the "I" visible and the on-page
+    # checkbox hidden. Solution: wipe the whole panel and re-render it with
+    # native controls.
+    #
+    # Layout:
+    #   y=482   italic Label "Where applicable:" (~16 px tall)
+    #   y=502   row 1: CheckBox + wrapping Label (under-16 supervision)
+    #   y=528   row 2: CheckBox + wrapping Label (student under direction)
+    # CheckBox at x=66 (cell-left + small inset). Label sits to the right
+    # of the CheckBox at x=85 with word-wrap so the text occupies up to
+    # two visual lines (matching the original PDF's wrap point).
     # ============================================================
+    layout.add(Label(
+        name='lblWhereApplicable',
+        rect=Rect(_pt(60), _pt(482), _pt(120), 14),
+        text='Where applicable:',
+        italic=True,
+        font_size=10,
+    ))
+
+    CB_SIZE = 14
+    CB_X = _pt(66)
+    LBL_X = _pt(85)            # ~5 pt gap right of the checkbox
+    LBL_W = _pt(540) - LBL_X    # extends to right cell border
+    LBL_H = 24                  # two-line wrap height
+
     layout.add(CheckBox(
         name='cbUnder16Accompanied',
-        rect=Rect(_pt(66), _pt(504), 14, 14),
+        rect=Rect(CB_X, _pt(502), CB_SIZE, CB_SIZE),
         caption='',
         tab_order=6,
     ))
+    layout.add(Label(
+        name='lblUnder16Text',
+        rect=Rect(LBL_X, _pt(502), LBL_W, LBL_H),
+        text='I note that my child, if under 16 MUST BE ACCOMPANIED by '
+             'myself or another responsible adult and I will arrange this.',
+        word_wrap=True,
+        auto_size=False,
+        font_size=10,
+    ))
+
     layout.add(CheckBox(
         name='cbStudentDirected',
-        rect=Rect(_pt(66), _pt(528), 14, 14),
+        rect=Rect(CB_X, _pt(528), CB_SIZE, CB_SIZE),
         caption='',
         tab_order=7,
+    ))
+    layout.add(Label(
+        name='lblStudentText',
+        rect=Rect(LBL_X, _pt(528), LBL_W, LBL_H),
+        text='I fully understand that the aforementioned operation may be '
+             'performed by a student under the direction of the podiatrist.',
+        word_wrap=True,
+        auto_size=False,
+        font_size=10,
     ))
 
     # ============================================================
