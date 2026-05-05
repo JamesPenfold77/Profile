@@ -20,7 +20,9 @@ generators/pdf_to_jfa/
 └── forms/                # One Python module per form
     ├── hello_world.py
     ├── consent_pelvic_floor.py
-    └── regenerate_pelvic_floor_background.py
+    ├── regenerate_pelvic_floor_background.py
+    ├── consent_invasive_procedure_podiatry.py
+    └── regenerate_podiatry_consent_background.py
 ```
 
 The design is **fixtures + emitters**: form-level boilerplate (root form properties, the 16-entry macros block, NoteBook prelude, NZDF context row) is spliced verbatim from a known-good minimal sample. Per-control DFM is emitted by hand using the property sets observed in working samples.
@@ -36,6 +38,7 @@ python -m generators.pdf_to_jfa.pdf_to_jfa <form_module> <output_path>
 # Example
 python -m generators.pdf_to_jfa.pdf_to_jfa hello_world output/HelloWorld.jfa
 python -m generators.pdf_to_jfa.pdf_to_jfa consent_pelvic_floor output/ConsentPelvicFloorEval.jfa
+python -m generators.pdf_to_jfa.pdf_to_jfa consent_invasive_procedure_podiatry output/ConsentInvasiveProcedurePodiatry.jfa
 ```
 
 The form module name is the filename in `forms/` without `.py`.
@@ -45,7 +48,7 @@ The form module name is the filename in `forms/` without `.py`.
 For forms based on existing PDFs, the simplest path to a faithful reproduction is:
 
 1. **Rasterize the PDF** at 96 DPI (matches the DFM's pixel coordinate system; A4 → 794 × 1123 px)
-2. **Mask out** any page elements you don't want in the digital version (page numbers, underscore lines for handwritten fields)
+2. **Mask out** any page elements you don't want in the digital version (page numbers, underscore lines for handwritten fields, **example data baked into the source PDF as graphics**)
 3. **Embed the masked PNG** as a single full-canvas `TICDOImage` at (0, 0)
 4. **Overlay input controls** at pixel positions that align with the visual fields in the image
 
@@ -67,6 +70,10 @@ with pdfplumber.open(pdf_path) as pdf:
 
 Page numbers usually appear as standalone `'1'`, `'2'`, ... characters in the bottom margin. Filter `page.chars` by text content and y-position.
 
+**Word-table-cell forms have NO underscore characters** — fillable lines are cell-row bottom borders, not `_` runs. For these forms, identify mask regions from the cell geometry instead: `page.find_tables()` returns cell bboxes; the fillable space is each cell's interior between the label text and the cell's bottom border.
+
+**Example data baked as graphics is invisible to `page.chars`.** The Podiatry consent PDF (Form 4023J) has an example date "04/09/21" rendered as a graphic (no text characters extractable). Detect it via pixel analysis on the rasterized image: scan for dark text-like blobs in regions where input fields are expected. The `regenerate_podiatry_consent_background.py` mask table calls this out explicitly so future regenerations don't lose track of why those coordinates were chosen.
+
 ### Mask edge padding
 
 Add ~2 points of padding on each edge of the mask to fully cover anti-aliased pixel edges. **Caveat**: if a label sits immediately adjacent to a masked region (e.g. the underscore line ends just before "Date:"), don't pad on that side — you'll clip the label. Use asymmetric per-edge padding:
@@ -78,6 +85,8 @@ mask_regions = [
     (418.3, 557.4, 529.4, 568.0, 0, 2, 2, 2, 'Date underscores'),       # left edge tight
 ]
 ```
+
+For Word-table-cell forms, padding is usually 0 on all edges — the masks are positioned tightly inside cell interiors, so edges are already clear of labels.
 
 ## The calibration loop
 
@@ -113,6 +122,29 @@ After calibration, document the manual adjustments with a comment in the form mo
 - Manual designer adjustments produce small per-row variance (e.g. Date x at 560/565/575 across three rows). Standardise these in the form module rather than preserving the variance — the variance reflects mouse imprecision, not intent
 - The NoteBook width should match `client_width` to avoid an empty column on the right edge of the visible canvas
 - Date controls don't need to share x-alignment with Names/Signatures — visually the original PDF design (Date beside Signature, narrower) often reads better
+
+### Calibration tips for Word-table-cell forms (Podiatry consent)
+
+- Underline = cell-row bottom border, NOT a separate underscore line. Anchor controls so their *bottom* sits at the underline (slightly above so typed text rests above the line). Formula: `y_top = underline_y - control_height` works as a first pass.
+- Cell borders intrude into masked areas — extend masks by 1–2 pt in both x directions to cover the cell-border stubs that survive otherwise.
+- Word checkbox squares are tiny (≈10 pt × 10 pt). Mask precisely; controls overlaid here are ~14 px CheckBox primitives, not table cells.
+
+## TISliceImageEditor: drawing/markup canvas
+
+`TISliceImageEditor` (note: prefix is `TI…`, not `TICDO…`) is a markup control that lets the user draw on / annotate an image. The Profile source unit is `Profile/Client/Infrastructure/Scripting/USSliceEditor.pas`; toolbar tools include pen, line, rectangle, round-rect, ellipse, label, eraser, colour picker, zoom, image-stamp, arrow lines, triangles, and open/remove background image.
+
+**Use it for any "indicate area on a diagram" interaction.** Examples: a podiatrist marks an area of nail/tissue on foot diagrams; a clinician circles an area on an anatomical diagram; staff annotate a patient ID photo.
+
+**Property set is fixed** — copy the block emitted by `dfm_writer._emit_slice_editor`. The properties (`DefaultFont.*`, `DefaultBrush.*`, `DefaultToolBarSettings.*`, `DefaultStamp.*`) are not optional; they're what `TISliceImageEditor` instances always carry, lifted verbatim from the minimal sample's empty-instance template (`TISliceImageEditor1` in `Form Template - Form.jfa`).
+
+**No image data is embedded in the DFM.** Two strategies for getting an image into the slice editor:
+
+1. **Image stays in the form-level background**, slice editor sits transparently on top. The user draws on the slice editor; their marks visually overlay the underlying image. The image isn't owned by the slice editor and can't be replaced per-instance, but layout is dead simple. The Podiatry consent uses this strategy.
+2. **Load at runtime** via the COM API: `Form.Controls_("sliceFoot1").BackgroundImage.LoadFromFile("...")`. The user (or a macro at form-open time) loads a per-instance background. Use when each form instance might use a different image.
+
+Strategy 1 is the default; strategy 2 needs a `FormPreloadMacro` filled in. Don't bake image bytes into the slice editor's DFM — the published property `BackgroundImage` doesn't serialise as inline `Picture.Data`; experiments would be guesswork.
+
+**Slicing a multi-panel image into separate slice editors.** For images that contain logically distinct panels (e.g. three foot diagrams in one rasterized strip), use one slice editor per panel rather than a single one over the whole strip. Each gets its own drawing layer, so marks on the Plain panel don't bleed into the Dorsal/Plantar panels. Find panel boundaries by column-darkness analysis of the rasterized image: long runs of mostly-white columns mark gaps between panels. The Podiatry consent has worked example code in `consent_invasive_procedure_podiatry.py`.
 
 ## Adding a new form
 
@@ -159,7 +191,7 @@ def build_layout(form_def_id: int = 90000020,
 
 ### 2. Build the masked background
 
-Either commit a regeneration helper alongside the form (preferred — see `regenerate_pelvic_floor_background.py` for a template) or commit the PNG directly. The helper approach avoids checking binary assets into git and lets the source PDF be the source of truth.
+Either commit a regeneration helper alongside the form (preferred — see `regenerate_pelvic_floor_background.py` and `regenerate_podiatry_consent_background.py` for templates) or commit the PNG directly. The helper approach avoids checking binary assets into git and lets the source PDF be the source of truth.
 
 ### 3. Generate, import, calibrate
 
@@ -174,9 +206,10 @@ Import into Profile. Adjust controls. Export back. Update the form module with t
 The synthetic form-def id (OBSV [3] of the 100502 row) is remapped by Profile on import — it doesn't need to refer to an existing database row. But forms in the same generator should use **distinct** placeholder ids to make exported logs and debug output easier to trace:
 
 ```
-hello_world           form_def_id = 90000001
-consent_pelvic_floor  form_def_id = 90000010
-<next form>           form_def_id = 90000020
+hello_world                           form_def_id = 90000001
+consent_pelvic_floor                  form_def_id = 90000010
+consent_invasive_procedure_podiatry   form_def_id = 90000020
+<next form>                           form_def_id = 90000030
 ```
 
 Increment by 10 to leave room.
@@ -200,6 +233,56 @@ The HRI/TI integer is a termset concept id. Whether these IDs need to pre-exist 
 
 Adding 100511/100517/100519 row emission to the generator is straightforward — see the structure in the busy reference sample. The row layout is documented in the **jfa-format** skill.
 
+`TISliceImageEditor` data persistence is unclear — its content is the drawn graphics in `DrwLayer` plus any `BgLayer` image the user loaded, neither of which obviously fits the 100511/100517/100519 row schema. Likely requires a different field-row class (one that carries serialized graphics + image). Investigate by exporting a populated sample from Profile and comparing field-rows against the busy reference.
+
+## Verifying CRLF and jaffa-encoding correctness
+
+The generator already produces the right output, but verification scripts can deceive you. Two specific traps cost time on the Podiatry consent run; the rules below are how to avoid them next time.
+
+**Read JFA files with `newline=''`.** Python's text-mode `open()` defaults to universal-newline translation, which silently rewrites `\r\n` to `\n` on read. A `content.split('\r\n')` then returns one part instead of five and looks like the row separators are missing. Always use `open(path, 'r', encoding='utf-8', newline='')` so `\r\n` is preserved verbatim.
+
+```python
+# Right
+with open('output.jfa', 'r', encoding='utf-8', newline='') as f:
+    content = f.read()
+parts = content.split('\r\n')           # 5 parts: HEAD, LNVR, OBSV×2, ''
+
+# Wrong (silent universal-newline translation)
+with open('output.jfa', 'r', encoding='utf-8') as f:
+    content = f.read()
+parts = content.split('\r\n')           # 1 part — looks broken but isn't
+```
+
+**Count bytes, not Python escape literals.** A 1-byte CRLF at the file level is `b'\r'` + `b'\n'` (two bytes). The jaffa-encoded form is `b'\\0d\\0a'` — *four* bytes: `\`, `0`, `d`, `\`, `0`, `a` (six bytes total for the pair). When checking that DFM line breaks were properly escaped:
+
+```python
+with open('output.jfa', 'rb') as f:
+    raw = f.read()
+
+# Real CRLF row separators (HEAD/LNVR/OBSV/OBSV)
+real_crlf = raw.count(b'\r\n')                  # expect 4
+
+# Jaffa-encoded line breaks inside the DFM
+jaffa_cr = raw.count(b'\x5c\x30\x64')           # = b'\0d', the byte sequence \,0,d
+jaffa_lf = raw.count(b'\x5c\x30\x61')           # = b'\0a', the byte sequence \,0,a
+# expect both > 0 and roughly equal (one per DFM line)
+
+# Common mistake: b'\\\\0d' is FOUR bytes (\, \, 0, d) — won't match anything
+```
+
+If `real_crlf == 4` and `jaffa_cr / jaffa_lf` are in the thousands, the file is structurally correct: four row separators at the file level, plus the encoded line breaks inside the DFM that's stored in OBSV [13]. Anything else is a real bug.
+
+**Sanity-check the row count and field counts before debugging the DFM.** If the four row separators are present and the field counts are right (HEAD: 15 fields, LNVR: 6, OBSV 100503: 44, OBSV 100502: 44), the framing is sound — any remaining issues are inside the DFM, not at the JFA file level.
+
+```python
+parts = content.split('\r\n')
+assert len(parts) == 5  # 4 rows + trailing empty from final CRLF
+assert parts[0].split('\t')[0] == 'HEAD' and len(parts[0].split('\t')) == 15
+assert parts[1].split('\t')[0] == 'LNVR' and len(parts[1].split('\t')) == 6
+assert parts[2].split('\t')[0:3] == ['OBSV', '2', '100503'] and len(parts[2].split('\t')) == 44
+assert parts[3].split('\t')[0:3] == ['OBSV', '2', '100502'] and len(parts[3].split('\t')) == 44
+```
+
 ## Common failure modes
 
 | Symptom | Likely cause |
@@ -211,21 +294,21 @@ Adding 100511/100517/100519 row emission to the generator is straightforward —
 | Form imports but a control type is missing | Likely emitting an unrecognized class name. The class palette in working samples is in the **jfa-format** skill |
 | Single-quote characters in captions break rendering | Quotes in DFM strings escape by doubling (`'O''Brien'`), not backslash |
 | Form imports but input controls drift below their labels by ~18 px | First-pass calibration formula is too generous — see "Calibration tips" above |
+| `TISliceImageEditor` import fails or shows blank | Don't omit any of the `Default*` properties — Profile's DFM streamer expects the full property set documented in `_emit_slice_editor`. Copy the block byte-for-byte from the minimal sample. |
 
 ## Reference samples
 
 Two byte-precise samples in `generators/pdf_to_jfa/reference_samples/`:
 
-- `Form_Template_-_Form.jfa` — minimal blank form. The fixtures in `fixtures.py` are sliced verbatim from this file.
+- `Form_Template_-_Form.jfa` — minimal blank form with one of every control type (Label, Edit, Memo, RichEdit, RadioButton, CheckBox, Button, ComboBox, ListControl, Image, Bevel, Shape, **TISliceImageEditor**). The fixtures in `fixtures.py` are sliced verbatim from this file. The control palette in this sample is the canonical reference for property-set emissions.
 - `Sample_Form_Template_Consent_for_Health_Care.jfa` — busy populated form. Demonstrates field-row classes and ~30 controls.
 
 If you need to verify the generator's output structure matches a known-good sample, decode both DFMs and diff the sections that should be invariant (root form props before Caption, the macros block, the NoteBook prelude). The generator's first pass through Hello World achieved byte-identical match on these sections.
 
 ## Successful round-trips
 
-As of April 2026:
+As of May 2026:
 
 - **HelloWorld.jfa** (single TICDOLabel) — imports cleanly, renders correctly. Validates the file-level structure end-to-end.
-- **ConsentPelvicFloorEval.jfa** (full-page background TICDOImage + 9 input controls: 3× TICDOEdit, 3× TICDOSignature, 3× TICDOEdit-as-date) — imports cleanly, renders correctly after one calibration round-trip. Validates the full control palette except checkbox/radio.
-
-The next form to generate from scratch will be the first test of the checkbox/radio code paths, which are emitted by `dfm_writer.py` but have not yet been exercised against a real Profile import.
+- **ConsentPelvicFloorEval.jfa** (full-page background TICDOImage + 9 input controls: 3× TICDOEdit, 3× TICDOSignature, 3× TICDOEdit-as-date) — imports cleanly, renders correctly after one calibration round-trip. Validates the full control palette except checkbox/radio/memo/slice.
+- **ConsentInvasiveProcedurePodiatry.jfa** (background image + 3× TISliceImageEditor + 3× TICDOEdit + 3× TICDOEdit-as-date + 3× TICDOSignature + 1× TICDOMemo + 2× TICDOCheckBox = 16 items total) — generated, awaiting first import to validate the slice editor and checkbox/memo code paths against a real Profile run.
