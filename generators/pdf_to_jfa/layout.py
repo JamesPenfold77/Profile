@@ -10,7 +10,8 @@ the per-form layout module, not this module — it varies by form / DPI / page.
 
 Supported control types are anchored on what the minimal sample's DFM
 demonstrates (TICDOLabel, TICDOEdit (with date variant), TICDOMemo,
-TICDORichEdit, TICDOSignature, TICDOCheckBox, TICDORadioButton, TICDOImage).
+TICDORichEdit, TICDOSignature, TICDOCheckBox, TICDORadioButton, TICDOImage),
+plus the markup control TISliceImageEditor for click/draw markup over an image.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -103,6 +104,28 @@ class Image(LayoutItem):
     image_path: str = ''
     stretch: bool = True
     proportional: bool = True
+
+
+@dataclass
+class SliceImageEditor(LayoutItem):
+    """
+    Markup canvas — TISliceImageEditor.
+
+    A drawable image-annotation control. The user can mark up the area with
+    pen, line, rect, ellipse, label, etc. via the toolbar. Used here as
+    transparent overlays positioned over portions of a background image
+    (e.g. each foot diagram in a podiatry consent form), so the user can
+    indicate areas of interest by drawing on top of them.
+
+    No image is embedded in the DFM by this control type — the property
+    layout matches the minimal sample's blank-instance template. If a
+    pre-loaded background is needed for the slice itself (rather than
+    relying on a form-level image underlay), it must be loaded at runtime
+    via the COM API (ISeBackgroundImage.LoadFromFile).
+    """
+    tab_order: int = 0
+    show_toolbar: bool = True
+    show_hint: bool = True
 
 
 @dataclass
