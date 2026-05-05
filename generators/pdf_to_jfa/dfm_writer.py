@@ -14,7 +14,7 @@ from io import StringIO
 from . import fixtures
 from .layout import (
     FormLayout, LayoutItem, Label, Edit, DateEdit, Memo, RichEdit,
-    Signature, CheckBox, RadioButton, Image, Rect,
+    Signature, CheckBox, RadioButton, Image, SliceImageEditor, Rect,
 )
 
 
@@ -22,6 +22,17 @@ from .layout import (
 # Consent-for-Health-Care sample uses TdxPNGImage (DevExpress) for embedded PNGs,
 # byte prefix 0B 'TdxPNGImage'. Standard Delphi TPngImage would be 09 'TPngImage'.
 IMAGE_STREAM_PREFIX_HEX = '0B546478504E47496D616765'  # length(11) + 'TdxPNGImage'
+
+
+# TISliceImageEditor toolbar button set, lifted verbatim from the minimal
+# sample's empty-instance template. Profile's slice editor renders a toolbar
+# with these tools when ToolBarVisible is True.
+SLICE_EDITOR_TOOLBAR_TOOLS = (
+    '[ttUndefined, ttArrow, ttPen, ttLine, ttRect, ttRoundRect, ttEllipse, '
+    'ttLabel, ttEraser, ttColour, ttZoom, ttOpenImage, ttDSImage, ttStamp, '
+    'ttImage, ttArrowLine, ttTwoArrowLine, ttTriangleVert, ttTriangleHoriz, '
+    'ttOpenBGImage, ttRemoveBGImage]'
+)
 
 
 def _quote(s: str) -> str:
@@ -190,6 +201,37 @@ def _emit_image(b: _Buf, item: Image) -> None:
     b.line(4, 'end')
 
 
+def _emit_slice_editor(b: _Buf, item: SliceImageEditor) -> None:
+    """Emit a TISliceImageEditor — a markup canvas the user can draw on.
+
+    Property set lifted from the minimal sample's blank-instance template
+    (TISliceImageEditor1 in Form Template - Form.jfa). No image data is
+    embedded — Profile loads any background image at runtime via the
+    BackgroundImage COM API or the toolbar's ttOpenBGImage tool.
+    """
+    r = item.rect
+    b.line(4, f'object {item.name}: TISliceImageEditor')
+    b.line(5, f'Left = {int(r.x)}')
+    b.line(5, f'Top = {int(r.y)}')
+    b.line(5, f'Width = {int(r.w)}')
+    b.line(5, f'Height = {int(r.h)}')
+    b.line(5, 'ParentShowHint = False')
+    b.line(5, f'ShowHint = {"True" if item.show_hint else "False"}')
+    b.line(5, 'DefaultFont.Charset = ANSI_CHARSET')
+    b.line(5, 'DefaultFont.Color = clWindowText')
+    b.line(5, 'DefaultFont.Height = -11')
+    b.line(5, "DefaultFont.Name = 'Tahoma'")
+    b.line(5, 'DefaultFont.Style = []')
+    b.line(5, 'DefaultBrush.Color = clBlack')
+    b.line(5, f'DefaultToolBarSettings.ToolTypes = {SLICE_EDITOR_TOOLBAR_TOOLS}')
+    b.line(5, 'DefaultToolBarSettings.DefaultTool = ttArrow')
+    b.line(5, f'DefaultToolBarSettings.ToolBarVisible = {"True" if item.show_toolbar else "False"}')
+    b.line(5, 'DefaultStamp.Style = gssRect')
+    b.line(5, 'DefaultStamp.Size = 14')
+    b.line(5, 'DefaultStamp.Color = clBlack')
+    b.line(4, 'end')
+
+
 def _emit_item(b: _Buf, item: LayoutItem) -> None:
     if isinstance(item, Label):
         _emit_label(b, item)
@@ -207,6 +249,8 @@ def _emit_item(b: _Buf, item: LayoutItem) -> None:
         _emit_radio(b, item)
     elif isinstance(item, Image):
         _emit_image(b, item)
+    elif isinstance(item, SliceImageEditor):
+        _emit_slice_editor(b, item)
     else:
         raise TypeError(f'Unsupported layout item: {type(item).__name__}')
 
