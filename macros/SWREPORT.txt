@@ -1331,55 +1331,6 @@ end Sub
 
 '--- Fill in the totals For each column of this set of Cases -- 
 Sub CollectStats(aCases)                                        '===============
-  For i = 0 to aCases.Count - 1
-    set thisCase = aCases.Items()(i)
-
-    ' Compute per-case values once, outside the column loops.
-    ' GetCaseServicePOSCode runs a Profile.LoadCaseServices DB query, and
-    ' GetCasePatientService does a patient load; previously both were called
-    ' inside inner loops (O(cases * columns) DB hits).
-    aCasePosCode = GetCaseServicePOSCode(thisCase)
-    aCasePatSvc  = GetCasePatientService(thisCase)
-    set aCasePatient = Nothing
-    If not (thisCase.Patient is Nothing) then
-      set aCasePatient = LoadPatientCached(thisCase.Patient.Id)
-    End if
- 
-    For j = 0 to UBOUND(aPosLocations)     'Location counts
-      If aPosCodes(j) = aCasePosCode then
-        vReport.CurrentItem(aPosLocations(j)) = vReport.CurrentItem(aPosLocations(j)) + 1 
-        vReport.CurrentItem(cTotal) = vReport.CurrentItem(cTotal) + 1 
-      End if
-    Next  ' j
-
-    For j = 0 to aSWProviders.count - 1     'Provider Counts
-      set thisProv = aSWProviders.Items()(j)
-      If thisCase.Case_Manager is Nothing then 
-          
-      elseIf thisCase.Case_Manager.Id = thisProv.Id  then 
-        vReport.CurrentItem(thisProv.Code) = vReport.CurrentItem(thisProv.Code) + 1 
-      End If    
-    Next  ' j 
-            
-    aPatientHeaders = aMilServiceList.Keys     'Patient service  Counts
-    For j = 0 to UBOUND(aPatientHeaders)
-      If aPatientHeaders(j) = aCasePatSvc then 
-        vReport.CurrentItem(aPatientHeaders(j)) = vReport.CurrentItem(aPatientHeaders(j)) + 1 
-      end If   
-    Next  ' j 
-
-    ' Gender + Ethnicity counts (from the case's patient)
-    If not (aCasePatient is Nothing) then
-      aKeyGender = GetPatientGenderKey(aCasePatient)
-      vReport.CurrentItem(aKeyGender) = vReport.CurrentItem(aKeyGender) + 1
-      aKeyEth = GetPatientEthnicityKey(aCasePatient)
-      vReport.CurrentItem(aKeyEth) = vReport.CurrentItem(aKeyEth) + 1
-    End if
-  Next  ' i 
-end Sub
-
-'--- Fill in the totals For each column of this set of Cases -- 
-Sub CollectStats(aCases)                                        '===============
 ' v2.15: skip cases whose patient cannot be resolved, so every row-total
 ' increment pairs with exactly one Gender + one Ethnicity increment. With
 ' FilteredPatient (PatientType=1) gating the case lists, this is the
