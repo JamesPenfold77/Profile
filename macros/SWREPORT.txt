@@ -1465,6 +1465,49 @@ Sub LoadAppts                                         '=========================
   Next
 end Sub
 
+ ' Fill in the totals For each column of this set of Appts --
+Sub CollectStatsApp(aAppLine)                                   '===================
+  set aCol = aAppLine.GetCollection
+
+  For i = 0 to aCol.Count - 1
+    aKey = aCol.Keys()(i)
+    aItem = aCol.Items()(i)
+    
+    For j = 0 to UBound(aPosLocations)     'Location counts
+      If aPosCodes(j) = aKey then
+        vReport.CurrentItem(aPosLocations(j)) = aItem 
+      End if
+    Next  ' j
+
+    'Provider counts - direct dictionary lookup instead of O(P) scan
+    If aSWProviders.Exists(aKey) then
+      vReport.CurrentItem(aKey) = aItem 
+    End if
+      
+    aPatientHeaders = aMilServiceList.Keys     'Patient service  Counts
+    For j = 0 to UBOUND(aPatientHeaders)
+      If aPatientHeaders(j) = aKey then 
+        vReport.CurrentItem(aPatientHeaders(j)) = aItem 
+      end If   
+    Next  ' j 
+
+    ' Gender columns
+    For j = 0 to UBound(aGenderHeaders)
+      If aGenderHeaders(j) = aKey then
+        vReport.CurrentItem(aKey) = aItem
+      End if
+    Next
+
+    ' Ethnicity columns
+    For j = 0 to UBound(aEthnicityHeaders)
+      If aEthnicityHeaders(j) = aKey then
+        vReport.CurrentItem(aKey) = aItem
+      End if
+    Next
+  Next 'i
+  vReport.CurrentItem(cTotal) = aAppLine.GetSum ' aTotal 
+end Sub
+
 Sub AddAppDuration(aAppLine, app)                         '========================
   set aDict = aAppLine.GetCollection
   aAppLine.AddSum app.Duration
