@@ -1,4 +1,17 @@
 '-------  SWREPORT
+' Version 2.15
+' Author: James Penfold - 06/05/2026
+' Reporting changes:
+'  - Remove "Non-Specified" rows from the Encounters and Per Presenting
+'    sections (filtered out by FilteredEncounterCode).
+'  - FilteredPatient now also requires aPatient.PatientType = 1, so non-
+'    Patient records (e.g. DHS placeholders, mis-typed entities) are
+'    excluded from every section.
+'  - Reconcile Gender and Ethnicity column-group totals: every row-total
+'    increment is now paired with exactly one Gender + one Ethnicity
+'    increment, so Male+Female+Gender Diverse and NZ Maori+Pakeha+
+'    Pasifika+Other each sum to the row total.
+'-----------------------------------------------------------------------------
 ' Version 2.14 
 ' Only issue msgbox error "Case type not found" if running client side
 '-----------------------------------------------------------------------------
@@ -141,7 +154,7 @@ Sub RunSWReport(aParams)                                '=======================
   aStartDate = DateValue(aMacroData(0))
   aEndDate = DateValue(aMacroData(1)) + 1  ' Remembering that filters use non-inclusive end dates
 
-  aReportName = "Social Worker Report (V2.13) For period " & ConvertDate(aStartDate) & " through " & ConvertDate(aEndDate - 1)
+  aReportName = "Social Worker Report (V2.15) For period " & ConvertDate(aStartDate) & " through " & ConvertDate(aEndDate - 1)
   set aRept = Profile.CreateStoredReportList(aReportName)
   aRept.AddHeader aReportName
   aRept.AddHeader "Report begins at " & Now()
@@ -1365,47 +1378,56 @@ Sub CollectStats(aCases)                                        '===============
   Next  ' i 
 end Sub
 
-' Fill in the totals For each column of this set of Appts --
-Sub CollectStatsApp(aAppLine)                                   '===================
-  set aCol = aAppLine.GetCollection
+'--- Fill in the totals For each column of this set of Cases -- 
+Sub CollectStats(aCases)                                        '===============
+' v2.15: skip cases whose patient cannot be resolved, so every row-total
+' increment pairs with exactly one Gender + one Ethnicity increment. With
+' FilteredPatient (PatientType=1) gating the case lists, this is the
+' belt-and-braces guard.
+  For i = 0 to aCases.Count - 1
+    set thisCase = aCases.Items()(i)
 
-  For i = 0 to aCol.Count - 1
-    aKey = aCol.Keys()(i)
-    aItem = aCol.Items()(i)
-    
-    For j = 0 to UBound(aPosLocations)     'Location counts
-      If aPosCodes(j) = aKey then
-        vReport.CurrentItem(aPosLocations(j)) = aItem 
-      End if
-    Next  ' j
-
-    'Provider counts - direct dictionary lookup instead of O(P) scan
-    If aSWProviders.Exists(aKey) then
-      vReport.CurrentItem(aKey) = aItem 
+    set aCasePatient = Nothing
+    If not (thisCase.Patient is Nothing) then
+      set aCasePatient = LoadPatientCached(thisCase.Patient.Id)
     End if
-      
-    aPatientHeaders = aMilServiceList.Keys     'Patient service  Counts
-    For j = 0 to UBOUND(aPatientHeaders)
-      If aPatientHeaders(j) = aKey then 
-        vReport.CurrentItem(aPatientHeaders(j)) = aItem 
-      end If   
-    Next  ' j 
+    If aCasePatient is Nothing then
+      ' No resolvable patient -> skip; cannot reconcile demographic columns.
+    Else
+      ' Compute per-case values once, outside the column loops.
+      aCasePosCode = GetCaseServicePOSCode(thisCase)
+      aCasePatSvc  = GetCasePatientService(thisCase)
+      aKeyGender   = GetPatientGenderKey(aCasePatient)
+      aKeyEth      = GetPatientEthnicityKey(aCasePatient)
+ 
+      For j = 0 to UBOUND(aPosLocations)     'Location counts
+        If aPosCodes(j) = aCasePosCode then
+          vReport.CurrentItem(aPosLocations(j)) = vReport.CurrentItem(aPosLocations(j)) + 1 
+          vReport.CurrentItem(cTotal) = vReport.CurrentItem(cTotal) + 1 
+        End if
+      Next  ' j
 
-    ' Gender columns
-    For j = 0 to UBound(aGenderHeaders)
-      If aGenderHeaders(j) = aKey then
-        vReport.CurrentItem(aKey) = aItem
-      End if
-    Next
+      For j = 0 to aSWProviders.count - 1     'Provider Counts
+        set thisProv = aSWProviders.Items()(j)
+        If thisCase.Case_Manager is Nothing then 
+          
+        elseIf thisCase.Case_Manager.Id = thisProv.Id  then 
+          vReport.CurrentItem(thisProv.Code) = vReport.CurrentItem(thisProv.Code) + 1 
+        End If    
+      Next  ' j 
+            
+      aPatientHeaders = aMilServiceList.Keys     'Patient service  Counts
+      For j = 0 to UBOUND(aPatientHeaders)
+        If aPatientHeaders(j) = aCasePatSvc then 
+          vReport.CurrentItem(aPatientHeaders(j)) = vReport.CurrentItem(aPatientHeaders(j)) + 1 
+        end If   
+      Next  ' j 
 
-    ' Ethnicity columns
-    For j = 0 to UBound(aEthnicityHeaders)
-      If aEthnicityHeaders(j) = aKey then
-        vReport.CurrentItem(aKey) = aItem
-      End if
-    Next
-  Next 'i
-  vReport.CurrentItem(cTotal) = aAppLine.GetSum ' aTotal 
+      ' Gender + Ethnicity counts (always paired with the row-total above)
+      vReport.CurrentItem(aKeyGender) = vReport.CurrentItem(aKeyGender) + 1
+      vReport.CurrentItem(aKeyEth)    = vReport.CurrentItem(aKeyEth) + 1
+    End if
+  Next  ' i 
 end Sub
 
 Sub LoadAppts                                         '=========================
@@ -1672,14 +1694,16 @@ Function GetPatientService(aPatient)            '===============================
 End Function
 
 Function FilteredPatient(aPatient)               '==============================
+' v2.15: require aPatient.PatientType = 1 so non-Patient records (e.g. DHS
+' placeholders, mis-typed entities) are excluded from every section.
   FilteredPatient = False
-  If not aPatient is Nothing then
-    If UCase(aPatient.LastName) = "MOUSE" then: Exit Function  
-    If aPatient.GetPatLabelName = "DHS Patient" then: Exit Function  
-    If Instr(UCase(aPatient.LastName), "TEST") > 0 then: Exit Function
-    If Instr(UCase(aPatient.FirstNames), "TEST") > 0 then: Exit Function
-    If Instr(UCase(aPatient.FileNum), "TEST") > 0 then: Exit Function
-  End If
+  If aPatient is Nothing then: Exit Function
+  If aPatient.PatientType <> 1 then: Exit Function
+  If UCase(aPatient.LastName) = "MOUSE" then: Exit Function  
+  If aPatient.GetPatLabelName = "DHS Patient" then: Exit Function  
+  If Instr(UCase(aPatient.LastName), "TEST") > 0 then: Exit Function
+  If Instr(UCase(aPatient.FirstNames), "TEST") > 0 then: Exit Function
+  If Instr(UCase(aPatient.FileNum), "TEST") > 0 then: Exit Function
   FilteredPatient = True
 End Function
 
@@ -1688,7 +1712,9 @@ Function FilteredProvider(aEncounter)             '============================
 End Function
 
 Function FilteredEncounterCode(aCode)               '===========================
-  FilteredEncounterCode = inArray(arrExclude, aCode) < 0 
+' v2.15: also exclude cNonSpecified so empty/unspecified diagnoses are not
+' emitted as a "Non-Specified" row in the Encounters and Per Presenting sections.
+  FilteredEncounterCode = (inArray(arrExclude, aCode) < 0) and (aCode <> cNonSpecified)
 End Function
 
 Sub LoadCasesAndPatientServices(aCasesList, aFilter)  '=========================
