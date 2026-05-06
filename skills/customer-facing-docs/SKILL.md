@@ -1,6 +1,6 @@
 ---
 name: customer-facing-docs
-description: "Use this skill whenever a customer-facing Word document needs to be generated against the Intrahealth corporate template. Triggers include: 'customer-facing doc', 'doc I can share with customer', 'using the Intrahealth template', any .docx output intended for a customer, partner, or external audience. The skill defines the canonical approach — inject content into the template's own styles rather than applying custom styling via docx-js — and requires the template file to be attached to the conversation."
+description: "Use this skill whenever a customer-facing Word document needs to be generated against the Intrahealth corporate template. Triggers include: 'customer-facing doc', 'doc I can share with customer', 'using the Intrahealth template', any .docx output intended for a customer, partner, or external audience. The skill defines the canonical approach — inject content into the template's own styles rather than applying custom styling via docx-js — and fetches the template directly from this repo so no manual upload is needed."
 ---
 
 # Customer-Facing Documents – Intrahealth Template Skill
@@ -9,14 +9,24 @@ description: "Use this skill whenever a customer-facing Word document needs to b
 
 This skill produces customer-facing `.docx` deliverables (overviews, functional summaries, integration briefs, proposals) that use the **Intrahealth corporate template** directly. The template carries the letterhead, logo, fonts, colour palette, heading styles, table styles, and footer binding — so the output looks identical to anything else produced from that template.
 
-The key principle: **never rebuild the branding in code**. Take the actual template file the user provides, unpack it, replace the body content while preserving its styles, and repack. Do not try to approximate the template with docx-js style overrides — the result will always drift.
+The key principle: **never rebuild the branding in code**. Take the canonical template file, unpack it, replace the body content while preserving its styles, and repack. Do not try to approximate the template with docx-js style overrides — the result will always drift.
 
 ---
 
 ## Pre-requisites
 
-1. **The template file must be attached to the conversation.** If it is not, stop and ask the user to attach it. Do not fall back to a generic Arial/plain-styled doc — producing something that looks "close to" the template is worse than asking.
+1. **The template is stored in this repo as a base64 sidecar** at `docs/Intrahealth Document Template.docx.b64`, alongside the canonical `.docx`. The first step of every session that uses this skill is to fetch and decode the sidecar (see Workflow step 2). No manual attachment is needed.
 2. The `docx` skill at `/mnt/skills/public/docx/SKILL.md` must be read first — it documents `unpack.py`, `pack.py`, and `validate.py` which this skill relies on.
+
+### Why a sidecar?
+
+The GitHub MCP `get_file_contents` tool corrupts binary files when fetching them — it UTF-8-decodes the bytes, replacing every byte ≥ 0x80 with U+FFFD. A `.docx` is a ZIP archive and is roughly 40% non-ASCII bytes, so a direct fetch produces an unrecoverable file. The sidecar stores the same template as base64 text, which survives the MCP transport intact (ASCII text isn't corrupted). The decoder verifies SHA-256 on every decode, so corruption would be caught immediately.
+
+If you ever edit the canonical `.docx`, regenerate the sidecar with:
+```bash
+python3 scripts/build_template_sidecar.py "docs/Intrahealth Document Template.docx"
+```
+and commit both files together.
 
 ---
 
@@ -25,13 +35,36 @@ The key principle: **never rebuild the branding in code**. Take the actual templ
 ### 1. Read the docx skill
 Always start with `view /mnt/skills/public/docx/SKILL.md` — confirms the scripts path and unpack/pack behaviour.
 
-### 2. Unpack the template
+### 2. Fetch and decode the template
+Use the GitHub MCP `get_file_contents` tool to fetch `docs/Intrahealth Document Template.docx.b64` from `intrahealth-source/profile` (or whichever fork is canonical for the session — typically `JamesPenfold77/Profile`). The returned `content` field is the sidecar text directly (it's an ASCII text file, not a binary, so the MCP returns it verbatim).
+
+Save the sidecar text to disk and decode it. The simplest path is to use the repo's own decoder, which also fetches via MCP:
+
 ```bash
-cp /mnt/user-data/uploads/<template>.docx /home/claude/work/template.docx
+mkdir -p /home/claude/work && cd /home/claude/work
+# Save the fetched sidecar text to disk (do this in Python after the MCP call)
+# Then:
+python3 /path/to/scripts/decode_template_sidecar.py "Intrahealth Document Template.docx.b64" --out template.docx
+```
+
+Or inline the decode in Python:
+```python
+import base64, hashlib
+SENTINEL = "<<<BASE64_PAYLOAD_BEGINS_BELOW>>>"
+header, payload = sidecar_text.split(SENTINEL, 1)
+binary = base64.b64decode(payload)
+# Verify SHA-256 against the value declared in the header — abort if it doesn't match.
+open('template.docx', 'wb').write(binary)
+```
+
+The decoded file should be exactly **193,609 bytes** with SHA-256 `3bdc7a68d570eceb0d5af5a132fb79f30a6a9a8d7fcf8bedb9c36c8767c4a612` (as of November 2026; the sidecar header carries the current authoritative hash). If the SHA-256 doesn't match, stop — the sidecar may be stale or corrupt.
+
+### 3. Unpack the template
+```bash
 python3 /mnt/skills/public/docx/scripts/office/unpack.py template.docx unpacked/
 ```
 
-### 3. Discover the template's style IDs
+### 4. Discover the template's style IDs
 Always inspect the template before writing content — don't assume standard names. Run:
 ```bash
 grep -E 'w:styleId=' unpacked/word/styles.xml
@@ -44,13 +77,13 @@ Map the styles you'll need:
 - Bullet style (Intrahealth: `BodyBullet`, which references `numId=1` already defined in `numbering.xml`)
 - Table style (Intrahealth: `PlainTable11` — navy header row, light banding, bold first column)
 
-### 4. Inspect the footer binding
+### 5. Inspect the footer binding
 Check `unpacked/word/footer1.xml`. The Intrahealth template's footer pulls the document title from `coreProperties/dc:title` via a structured document tag (`<w:sdt>`). To make the footer show the right title:
 ```bash
 sed -i 's|<dc:title>Document Title</dc:title>|<dc:title>Your Document Title</dc:title>|' unpacked/docProps/core.xml
 ```
 
-### 5. Rewrite the document body
+### 6. Rewrite the document body
 Work on `unpacked/word/document.xml`. The body has this structure:
 ```
 <w:body>
@@ -65,7 +98,7 @@ Work on `unpacked/word/document.xml`. The body has this structure:
 
 The safe rewrite pattern is to keep `<w:body>` open, keep the final `<w:sectPr>` block, and replace everything between. Use a Python script that anchors on `<w:body>` and `<w:sectPr` and splices new content between them.
 
-### 6. Build paragraphs using the template's styles
+### 7. Build paragraphs using the template's styles
 Write paragraph XML directly — don't use docx-js. Minimum viable paragraph:
 ```xml
 <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Heading text</w:t></w:r></w:p>
@@ -73,7 +106,9 @@ Write paragraph XML directly — don't use docx-js. Minimum viable paragraph:
 
 Body text omits the `<w:pStyle>` to inherit `Normal`. Bullets use `<w:pStyle w:val="BodyBullet"/>`. Always XML-escape text (`&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`) and add `xml:space="preserve"` on `<w:t>` elements with leading/trailing whitespace.
 
-### 7. Tables — use the template's table style
+Use Unicode characters directly in source strings — `'` (U+2019), `—` (U+2014), `"` `"` (U+201C/U+201D) — rather than XML entity references. Entity references inside `<w:t>` get double-escaped during pack and render as literal text.
+
+### 8. Tables — use the template's table style
 Do **not** hand-roll borders, shading, or header colours. Reference `PlainTable11` and let the template's style do the work:
 ```xml
 <w:tbl>
@@ -106,13 +141,15 @@ Do **not** hand-roll borders, shading, or header colours. Reference `PlainTable1
 
 Only the first row needs the `<w:cnfStyle>` marker inside `<w:trPr>` — that's what tells the table style this is the header row.
 
-### 8. Pack and validate
+Add an empty `<w:p/>` paragraph immediately after the closing `</w:tbl>` — without it, the table style can absorb the next heading and render it inside the table.
+
+### 9. Pack and validate
 ```bash
 python3 /mnt/skills/public/docx/scripts/office/pack.py unpacked/ Output.docx --original template.docx
 ```
 `pack.py` validates automatically. If it reports `All validations PASSED`, the file is structurally sound.
 
-### 9. Visual check
+### 10. Visual check
 Rendering differences between LibreOffice and Word are rare, but table style flags in particular can surprise you. Convert to PDF and eyeball the first 2 pages:
 ```bash
 python3 /mnt/skills/public/docx/scripts/office/soffice.py --headless --convert-to pdf Output.docx
@@ -124,12 +161,25 @@ Then `view page-1.jpg` and `view page-2.jpg`. Confirm:
 - Headings are the Intrahealth blue
 - Tables have the navy header row with white bold text
 - Body text is regular weight (not bolded by an unintended `lastRow` or `firstColumn` flag)
+- Smart quotes and em-dashes render as the actual characters, not as `&#x2019;` or `&#x2014;` literals
 
-### 10. Deliver
+### 11. Deliver
 ```bash
 cp Output.docx /mnt/user-data/outputs/
 ```
 Then call `present_files` with the output path.
+
+---
+
+## Source-grounding for Profile interface documents
+
+When the document describes a Profile interface (Healthlink eReferrals, BPAC eForms, ERMS, ClickSend, etc.), all factual claims must be grounded against the Profile source code in `intrahealth-source/profile`. Do not write claims from general knowledge or memory — verify them against:
+
+- The eMessages catalogue at `docs/Integrations/eMessages/integrations-overview.md` for whether an interface is an eMessages service
+- The relevant `Profile/Server/Business/UB*.pas` units for server-side behaviour
+- The relevant `Profile/Client/JaffaFiles/<Interface>/*.jfa` artefacts for client-side artefacts (toolbar buttons, configuration forms, short codes)
+
+If the source can't be verified within the session (MCP unresponsive, file not yet read), flag the affected claim inline as **"To confirm:"** and continue. Do not invent content to fill the gap. The source-grounding is what makes these docs trustworthy as reference material; without it, the doc is only as good as a Claude session's training data, which doesn't know about Profile's internals.
 
 ---
 
@@ -163,17 +213,20 @@ Every customer-facing doc should have, at minimum:
 
 ## Failure Modes to Avoid
 
-- **Rebuilding the template in docx-js.** Tempting when the user hasn't attached the file yet, but the output will never quite match the real template and will be visually inconsistent with other Intrahealth docs. Always ask for the template instead.
+- **Rebuilding the template in docx-js.** Tempting when something goes wrong with the sidecar fetch, but the output will never quite match the real template and will be visually inconsistent with other Intrahealth docs. If the sidecar can't be fetched or decoded, stop and surface the problem rather than falling back to docx-js styling.
 - **Using `Subtitle` (no hyphen) when the template defines `Sub-Title` (with hyphen).** The built-in `Subtitle` style exists alongside the custom one and will render differently. Verify by grepping `styles.xml`.
 - **Forgetting to update `dc:title` in `core.xml`.** The footer will keep saying "Document Title" because it's bound to that field.
 - **Setting `w:lastRow="1"` on tables with more than one data row.** `PlainTable11` will bold the final data row, which looks like a typo to the reader.
 - **Replacing the entire `<w:body>` contents including `<w:sectPr>`.** The document will lose its page size, margins, header/footer references, and orientation.
-- **Producing a "plain styled" fallback when the template isn't attached.** Don't. Ask for the template.
+- **XML entity references inside `<w:t>` (`&#x2019;`, `&#x2014;`).** These get double-escaped during pack and render as literal text. Use Unicode characters in source strings instead.
+- **Skipping the SHA-256 verification on the decoded template.** The decoder does this automatically; don't bypass it. A corrupted template that pack-validates fine can still produce a broken doc on Word's side.
+- **Using `Intrahealth_Document_Template.docx` (with underscores) as the canonical filename.** The repo path uses spaces: `Intrahealth Document Template.docx`. The build script and decoder both handle either, but be consistent with the repo when committing.
 
 ---
 
 ## Notes
 
-- Source template: uploaded by the user per session. Do not hardcode a template path; the template evolves.
-- Template as of April 2026: `Intrahealth_Document_Template.docx` — uses `Title`, `Sub-Title`, `Heading1/2/3`, `BodyBullet`, `PlainTable11`; footer binds to `dc:title` via structured document tag.
-- If the template changes (new styles, new footer binding, new logo), re-discover style IDs via `grep -E 'w:styleId='` before writing content. Don't assume last session's style names still apply.
+- **Canonical template:** `docs/Intrahealth Document Template.docx` in `JamesPenfold77/Profile` (note spaces in filename).
+- **Sidecar:** `docs/Intrahealth Document Template.docx.b64`, regenerated by `scripts/build_template_sidecar.py`. Decoded by `scripts/decode_template_sidecar.py`. Both scripts live in the repo `scripts/` directory.
+- **Template styles** (verified against the November 2026 template): `Title`, `Sub-Title` (hyphenated), `Heading1`, `Heading2`, `Heading3`, `BodyBullet`, `PlainTable11`. Footer binds to `dc:title` via SDT.
+- **If the template changes** (new styles, new footer binding, new logo): update the canonical `.docx`, regenerate the sidecar, commit both, and re-discover style IDs via `grep -E 'w:styleId='` before writing content. The skill stays valid; only the discovered style names may change.
