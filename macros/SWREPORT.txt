@@ -1,4 +1,16 @@
 '-------  SWREPORT
+' Version 2.16
+' Author: James Penfold - 07/05/2026
+' Reporting changes:
+'  - Demographic Data section: populate the same-category (diagonal) cells.
+'    Previously the Gender rows zeroed all Gender columns and the Ethnicity
+'    rows zeroed all Ethnicity columns ("self-crossings skipped"). Now each
+'    Gender row also fills its own Gender column (e.g. Gender - Male x Male)
+'    and each Ethnicity row fills its own Ethnicity column. Off-diagonal
+'    same-category cells (e.g. Gender - Male x Female) remain blank because
+'    a patient is in exactly one bucket per category. Cross-category
+'    population (Gender row x Ethnicity columns and vice versa) is unchanged.
+'-----------------------------------------------------------------------------
 ' Version 2.15
 ' Author: James Penfold - 06/05/2026
 ' Reporting changes:
@@ -149,12 +161,12 @@ Sub Main()
   RunSWReport(sFrom & "|" & sTo)
 end Sub
 
-Sub RunSWReport(aParams)                                '======================= 
+Sub RunSWReport(aParams)                                '=======================
   aMacroData = Split(aParams, "|")
   aStartDate = DateValue(aMacroData(0))
   aEndDate = DateValue(aMacroData(1)) + 1  ' Remembering that filters use non-inclusive end dates
 
-  aReportName = "Social Worker Report (V2.15) For period " & ConvertDate(aStartDate) & " through " & ConvertDate(aEndDate - 1)
+  aReportName = "Social Worker Report (V2.16) For period " & ConvertDate(aStartDate) & " through " & ConvertDate(aEndDate - 1)
   set aRept = Profile.CreateStoredReportList(aReportName)
   aRept.AddHeader aReportName
   aRept.AddHeader "Report begins at " & Now()
@@ -617,7 +629,8 @@ Sub LoadSWEncounters                                 '==========================
   Set gTotalPerIndCol = gTotalPerIndLine.GetCollection
 
   ' Demographic data section: 3 Gender rows + 4 Ethnicity rows (cross-tab of
-  ' unique patients per column grouping; self-crossing cells left blank).
+  ' unique patients per column grouping; same-category off-diagonal cells
+  ' left blank, but the diagonal -- e.g. Gender-Male x Male -- is populated).
   Set gDemoLines = New InternalLines
   gDemoLines.Init()
   gDemoLines.Add cDemoMale,      dDemoGenderFirst
@@ -652,12 +665,14 @@ end Sub
 Sub BuildDemographicLines                        '==============================
 ' Walk gEncounters once, producing per-patient-per-column-bucket unique counts
 ' in each of the 7 demographic InternalLines (3 Gender + 4 Ethnicity).
-' Self-crossings are skipped: a demographic row never populates columns of
-' its own category. E.g. the 'Gender - Male' row has blank Gender columns;
-' the 'Ethnicity - NZ Maori' row has blank Ethnicity columns.
+' v2.16: same-category diagonal cells are now populated (e.g. Gender-Male row
+' x Male column = unique male patient count). Off-diagonal same-category cells
+' (e.g. Gender-Male x Female) remain blank because a patient is in exactly one
+' bucket per category. Cross-category cells (Gender row x Ethnicity columns
+' and vice versa) remain populated as before.
   Dim aDemoRowMap
   ' Map each demographic row to the bucket key it matches and its category.
-  ' Category 'G' = Gender row (skip Gender cols), 'E' = Ethnicity row.
+  ' Category 'G' = Gender row, 'E' = Ethnicity row.
   aDemoRowMap = Array( _
     Array(cDemoMale,      cGenderMale,    "G"), _
     Array(cDemoFemale,    cGenderFemale,  "G"), _
@@ -734,16 +749,35 @@ Sub BuildDemographicLines                        '==============================
             End if
           End if
 
-          ' Cross-demographic columns only.
-          ' For Gender rows, populate Ethnicity columns (skip Gender columns).
-          ' For Ethnicity rows, populate Gender columns (skip Ethnicity columns).
+          ' Same-category diagonal column + cross-category columns.
+          ' v2.16: For Gender rows, populate BOTH the Gender diagonal cell
+          ' (row's own Gender bucket = aPatGender, since bIncludeRow holds)
+          ' AND the Ethnicity columns. For Ethnicity rows, populate BOTH the
+          ' Ethnicity diagonal cell AND the Gender columns. Off-diagonal
+          ' same-category cells stay blank since a patient is in exactly one
+          ' bucket per category, so only the row's own bucket column gets a
+          ' count.
           If aRowCat = "G" then
+            ' Diagonal Gender cell
+            aUKey = aRowLabel & ":G:" & aPatGender & ":" & aPatKey
+            If not gDemoUniq.Exists(aUKey) then
+              gDemoUniq.Add aUKey, ""
+              AddToColumnColl aDict, aPatGender, 1
+            End if
+            ' Cross-category Ethnicity cells
             aUKey = aRowLabel & ":X:" & aPatEth & ":" & aPatKey
             If not gDemoUniq.Exists(aUKey) then
               gDemoUniq.Add aUKey, ""
               AddToColumnColl aDict, aPatEth, 1
             End if
           ElseIf aRowCat = "E" then
+            ' Diagonal Ethnicity cell
+            aUKey = aRowLabel & ":E:" & aPatEth & ":" & aPatKey
+            If not gDemoUniq.Exists(aUKey) then
+              gDemoUniq.Add aUKey, ""
+              AddToColumnColl aDict, aPatEth, 1
+            End if
+            ' Cross-category Gender cells
             aUKey = aRowLabel & ":X:" & aPatGender & ":" & aPatKey
             If not gDemoUniq.Exists(aUKey) then
               gDemoUniq.Add aUKey, ""
@@ -1969,8 +2003,8 @@ Class InternalLines            ' Diag, Internal Line
     aInternalLine.Init()
     fDict.Add key, aInternalLine
     aInternalLine.Description = aDesc
-    aInternalLine.Code = key
     Set Add = aInternalLine
+    aInternalLine.Code = key
   End Function
 
   Public Function IsExist(aKey)
