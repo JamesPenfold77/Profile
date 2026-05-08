@@ -19,13 +19,13 @@ The following constraints apply:
   explicit error checks, then `On Error GoTo 0` to restore normal handling.
 - **No `Format()` function** — raises "Type mismatch: 'Format'" at runtime.
   Use `FormatDateTime` for dates, and a manual `FormatTime` helper for times
-  (see section 7).
+  (see section 10).
 - **No declaratives before `Sub Main()`** — `Dim`, `Const`, and any other
   declarative statement cause a syntax error if placed between the macro name
   header comment and `Sub Main()`. Declaratives may appear at module scope,
   but only *after* `Sub Main()` (i.e. after its `End Sub`). The cleanest
   pattern is to declare everything inside the `Sub`/`Function` that uses it.
-  See Section 9 for the full placement rule.
+  See Section 12 for the full placement rule.
 
 ### Correct patterns
 
@@ -80,7 +80,7 @@ Format(aTime, "hh:mm")
 
 ' CORRECT - use FormatDateTime for dates, FormatTime helper for times
 FormatDateTime(aDate, 2)   ' 2 = vbShortDate
-FormatTime(aTime)          ' see FormatTime / PadTwo in section 7
+FormatTime(aTime)          ' see FormatTime / PadTwo in section 10
 ```
 
 ```vb
@@ -635,7 +635,302 @@ aQuery.Run(aRunParam)
 
 ---
 
-## 6. Form Controls API
+## 6. Profile Type Library — Object Access Macros
+
+Object Access macros fire when a user opens or saves a Profile business object
+(Case, Patient, Contact/Encounter, etc.). They are configured against the
+object type in Profile admin and run inside the same VB scripting environment
+as standalone macros, with two extra context bindings: `ChangedObject` and
+`MacroResult`.
+
+### ChangedObject — the triggering object
+
+The object that triggered the macro is bound to `ChangedObject`. Always assign
+it to a typed local immediately so the rest of the macro reads naturally.
+
+```vb
+' Case Access macro
+Dim aCase
+Set aCase = ChangedObject
+
+' Contact (encounter) Access macro
+Dim aContact
+Set aContact = ChangedObject
+
+' Always guard against an unbound context — exit early if absent
+If aCase Is Nothing Then Exit Sub
+```
+
+### MacroResult — issuing warnings back to the host
+
+`MacroResult.AddWarning(aText)` is the Profile-native way to surface a warning
+from an Object Access macro. Profile decides how to display, log, and dismiss
+it; the macro just declares the warning and returns. **Do not use `MsgBox` for
+this purpose** — `MsgBox` blocks the UI thread, has no Profile-side audit, and
+bypasses any host-level warning handling.
+
+```vb
+If Not bMarkerPresent Then
+  MacroResult.AddWarning("Please check client record in Procura prior to engagement to check relevant information")
+End If
+```
+
+Multiple `AddWarning` calls in a single macro run are accumulated and presented
+together by the host.
+
+### Performance — Object Access macros run on every open/save
+
+Object Access macros are in the user's critical path — every Case open, every
+Contact save pays whatever cost the macro incurs. Two rules follow from this:
+
+1. **Order checks cheapest-first, with early exits.** Compare the case title
+   before loading anything. If 99% of case opens don't match the target title,
+   99% of opens incur essentially zero cost.
+2. **Avoid nested DB walks where a single indexed lookup will do.** See the
+   "Prefer Case Registry tokens" guidance in Section 7 — walking encounters
+   and contacts on every open is rarely the right design when a per-case
+   marker can be set once at the moment the underlying condition becomes true.
+
+```vb
+' GOOD — cheap title check first; expensive work only on the 1% path
+Sub Main()
+  Dim aCase
+  Set aCase = ChangedObject
+  If aCase Is Nothing Then Exit Sub
+
+  Dim aTitle
+  aTitle = ""
+  On Error Resume Next
+  aTitle = aCase.CaseTitle
+  On Error GoTo 0
+  If aTitle <> "Procura Data Migration" Then Exit Sub   ' early exit — no DB work
+
+  ' ... only now do the expensive checks
+End Sub
+```
+
+### Skeleton — Case Access Object macro
+
+```vb
+' Macro: ExampleCaseAccess
+' -----------------------------------------------------------------------
+' Case Access Object macro — fires when a Case is opened.
+' -----------------------------------------------------------------------
+
+Sub Main()
+  Dim aCase
+  Set aCase = ChangedObject
+  If aCase Is Nothing Then Exit Sub
+
+  ' 1. Cheapest filter first (e.g. title, type, status)
+  ' 2. Next-cheapest properties on the already-loaded object
+  ' 3. Indexed lookups (registry keys) before any collection walks
+  ' 4. Issue warnings via MacroResult.AddWarning, not MsgBox
+End Sub
+```
+
+---
+
+## 7. Profile Type Library — Case API
+
+### Common Case properties
+
+| Property | Type | Notes |
+|---|---|---|
+| `ID` | Integer | Unique case ID |
+| `CaseTitle` | String | The case's display title — e.g. `"Procura Data Migration"` |
+| `Patient` | Object | The client/patient on the case |
+
+`Patient` properties such as `IsActive` are not yet documented from the COM
+type library inspection; guard them with `On Error Resume Next` until
+verified, and update this section once the canonical name is confirmed.
+
+```vb
+Dim bClientActive
+bClientActive = False
+On Error Resume Next
+bClientActive = aCase.Patient.IsActive   ' confirm exact property name
+On Error GoTo 0
+```
+
+### Case Registry Keys — case-scoped metadata tokens
+
+Case Registry Keys are **case-scoped key/value tokens** intended for macros to
+record state about a case without cluttering the clinical record. They live on
+the Case object itself, are loaded with it, and can be looked up directly
+without a DB round-trip in the hot path.
+
+This makes them the right tool for "has X been done on this case?" markers
+that a Case Access macro needs to check on every open.
+
+#### Adding a registry key
+
+```vb
+Dim aRegKey
+Set aRegKey = aCase.AddRegistryKey("PROCURA")
+aRegKey.Value = "PROCURACHECK_DONE"
+```
+
+The first argument is the **code** (a category/key name); `.Value` is the
+associated string value. Multiple keys with the same code are permitted — use
+`GetRegistryKeysByCode` to retrieve all of them.
+
+#### Reading registry keys
+
+```vb
+Dim aKeys
+Set aKeys = aCase.GetRegistryKeysByCode("PROCURA")
+
+Dim bMarked
+bMarked = False
+Dim i
+For i = 0 To aKeys.Count - 1
+  If aKeys.Item(i).Value = "PROCURACHECK_DONE" Then
+    bMarked = True
+    Exit For
+  End If
+Next  'i
+```
+
+#### Idempotency
+
+Always check whether the key is already present before adding it again,
+especially in Object Access macros that may fire multiple times per
+business event.
+
+```vb
+Dim aKeys
+Set aKeys = aCase.GetRegistryKeysByCode("PROCURA")
+Dim i
+For i = 0 To aKeys.Count - 1
+  If aKeys.Item(i).Value = "PROCURACHECK_DONE" Then Exit Sub   ' already marked
+Next  'i
+
+Dim aRegKey
+Set aRegKey = aCase.AddRegistryKey("PROCURA")
+aRegKey.Value = "PROCURACHECK_DONE"
+```
+
+### Prefer Case Registry tokens over walking encounters/contacts
+
+When a Case Access macro needs to answer "has condition X been satisfied on
+this case?", there are two architectural choices:
+
+1. **Walk the encounter/contact graph at open time** to recompute the answer
+   from primary records. Correct, but expensive — it's a per-open DB cost
+   that grows with case size. See Section 8 for the encounter/contact API.
+2. **Set a registry-key token at the moment the condition becomes true**,
+   and check it at open time with a single in-memory lookup.
+
+Option 2 is almost always the right design for Object Access macros because:
+
+- It moves the cost from "every case open" (frequent) to "the one event that
+  satisfied the condition" (rare).
+- The check at open time is an in-memory call on the already-loaded Case,
+  not a DB query.
+- It composes naturally with idempotency and one-off backfills.
+
+The companion macro that sets the token typically runs as another Object
+Access macro on the underlying object (e.g. on the Contact whose creation
+satisfies the condition), navigates back to its parent Case, and calls
+`AddRegistryKey` if the marker is not already present.
+
+When the token approach is not appropriate — e.g. when the condition can be
+*reversed* by edits/deletions to the underlying records and the registry
+key has no clean way to be revoked — fall back to walking the encounter
+graph and accept the per-open cost.
+
+---
+
+## 8. Profile Type Library — Encounter and Contact API
+
+Use this API when the registry-key approach in Section 7 isn't viable and the
+macro genuinely needs to inspect clinical notes (encounters) and their linked
+contacts on a Case.
+
+### Loading encounters via filter
+
+```vb
+Dim aFilter
+Set aFilter = Profile.CreateEncounterFilter
+' Scope the filter to the case before calling .Load.
+' Confirm the exact property name on your Type library — common variants
+' are aFilter.CaseID = aCase.ID and Set aFilter.Case = aCase.
+aFilter.CaseID = aCase.ID
+
+Dim aEncounters
+Set aEncounters = aFilter.Load
+```
+
+Scope the filter as tightly as possible *before* calling `.Load`. Loading the
+full encounter set and filtering in VB is dramatically slower than letting
+the server filter server-side.
+
+### Iterating encounters and their linked contacts
+
+Each encounter exposes a `Contacts` collection. Each contact has a `TypeCode`
+(the coded contact type, e.g. `"PROCURACHECK"`).
+
+```vb
+Dim i
+For i = 0 To aEncounters.Count - 1
+  Dim aEncounter
+  Set aEncounter = aEncounters.Item(i)
+
+  Dim aContacts
+  Set aContacts = aEncounter.Contacts   ' cache once per encounter
+
+  Dim j
+  For j = 0 To aContacts.Count - 1
+    Dim aContact
+    Set aContact = aContacts.Item(j)
+
+    Dim aTypeCode
+    aTypeCode = ""
+    On Error Resume Next
+    aTypeCode = aContact.TypeCode
+    On Error GoTo 0
+
+    If UCase(aTypeCode) = "PROCURACHECK" Then
+      ' ... matched
+      Exit For
+    End If
+  Next  'j
+Next  'i
+```
+
+Notes:
+- **Cache `aEncounter.Contacts` into a local** — accessing it repeatedly in
+  the inner loop forces COM property reads and (on some types) lazy-loads.
+- **`Exit For` short-circuits**, avoiding unnecessary work once the answer
+  is known. Outer loops may need a flag-and-`Exit For` pair; do NOT use
+  `GoTo` (see Section 1).
+- **Compare `TypeCode` with `UCase`** if there is any chance the source data
+  is mixed case.
+
+### Navigating from a Contact back to its Case
+
+In Contact-creation Object Access macros, the macro typically needs to walk
+back from the changed Contact to its parent Case (to set a registry-key
+token, for example). The exact navigation chain is not yet confirmed from
+type library inspection — both `aContact.Encounter.Case` and `aContact.Case`
+are plausible variants. Guard the navigation until verified:
+
+```vb
+Dim aCase
+Set aCase = Nothing
+On Error Resume Next
+Set aCase = aContact.Encounter.Case   ' confirm exact chain
+On Error GoTo 0
+If aCase Is Nothing Then Exit Sub
+```
+
+Once the canonical chain is confirmed against the type library, this section
+should be updated and the guard removed.
+
+---
+
+## 9. Form Controls API
 
 ```vb
 ' Get a control by name
@@ -653,7 +948,7 @@ Controls_("cboName").Text  ' selected text
 
 ---
 
-## 7. Common Patterns
+## 10. Common Patterns
 
 ### Date and time formatting
 
@@ -802,7 +1097,7 @@ keys to avoid collisions:
 
 ---
 
-## 8. Macro Name Header — Required on First Line
+## 11. Macro Name Header — Required on First Line
 
 **ALWAYS place the macro name as a comment on the very first line of every macro.**
 
@@ -831,11 +1126,11 @@ display, so anything pushed below line 1 may not appear.
 
 **Nothing may appear between the header comment and `Sub Main()` except more
 comments.** Declaratives (`Dim`, `Const`, etc.) placed there produce a syntax
-error. See Section 9 for full placement rules.
+error. See Section 12 for full placement rules.
 
 ---
 
-## 9. Variable Declaration
+## 12. Variable Declaration
 
 ### Placement rule
 
@@ -896,7 +1191,7 @@ Dim aSharedState   ' module-level — OK here, after Sub Main()/other Subs
 
 ---
 
-## 10. Error Handling
+## 13. Error Handling
 
 Wrap all file I/O and Profile API calls in error handling:
 
@@ -912,7 +1207,7 @@ On Error GoTo 0
 
 ---
 
-## 11. Source References
+## 14. Source References
 
 - COM scripting layer (rules):    `Profile/Common/Infrastructure/Scripting/USAppointmentRule.pas`
 - COM scripting layer (groups):   `Profile/Common/Infrastructure/Scripting/USProviderGroups.pas`
