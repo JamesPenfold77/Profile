@@ -62,6 +62,8 @@ The exact contents of this table per line type are defined in `UBJaffaFileDeclar
 | `LNVR` | 3 |  6 | Line versions block — declares `(lineCode, version)` pairs the body uses |
 | `OBSV` | 2 | 44 | The "observation" workhorse line — used for both data observations and form-template definitions |
 | `SHRS` | 2 |  ? | Declared in LNVR but not used in any sample we've decoded |
+| `TYPT` | 3 | 17 | A macro ("Typing Template") — one line holds a whole macro's VBScript. See "Macro (TYPT) files" below |
+| `SCTP` / `SHTC` | 3 | – / 30 | Shortcode Type / Shortcode lookup records (e.g. the `CaseType Reason Mapping` export). SHTC field layout is in the **vb-profile-macros** skill |
 
 ### HEAD line layout (validated)
 
@@ -88,6 +90,57 @@ The exact contents of this table per line type are defined in `UBJaffaFileDeclar
 `LNVR \t 3 \t OBSV \t 2 \t SHRS \t 2`
 
 Constant across all samples — emit verbatim.
+
+(That's the CDO-form LNVR. Other file types declare their own record types,
+e.g. `LNVR \t 3 \t TYPT \t 3` for a macro, `LNVR \t 3 \t SCTP \t 3 \t SHTC \t 3`
+for a shortcode lookup.)
+
+## Macro (TYPT) files (validated, round-tripped many times on DEXREPORT_TEST)
+
+A macro exported from Profile, e.g.
+`Macro - (DEXREPORT_TEST) Generate Dex Report as XML file (TEST v11.15 - ...).jfa`,
+is a 4-line file (UTF-8 BOM, CRLF line ends, tab-delimited):
+
+```
+HEAD  3  4  TYPT  Typing Templates  Intrahealth  dd/mm/yyyy  HH.MM  M      F ...
+LNVR  3  TYPT  3
+TYPT  3  <MacroCode>  <Description>  (blank)  <MacroSource>  0  0  ...   (17 fields)
+(empty line)
+```
+
+| TYPT field | Meaning |
+|---|---|
+| [2] | Macro code, e.g. `DEXREPORT_TEST` — what `Profile.LoadShortCodeByCodeType(code, 10)` looks up |
+| [3] | Description shown in Profile's macro list — keep it in step with the file name and version (see the **vb-profile-macros** skill, "Macro file name and description track the version") |
+| [5] | The whole VBScript source, Jaffa-encoded (see "Field encoding" below) |
+
+**This is much simpler than a CDO form's embedded macros.** The source in
+[5] is plain VBScript with only the standard `\xx` field encoding: real CRLFs
+are `\0d\0a`, tabs `\09`, and every literal backslash `\5c` (so the VBScript
+`\` integer-division operator, Windows paths like `C:\Temp`, etc. all appear
+as `\5c`). There is **no** `^^^` newline marker and **no** Pascal `'...' +`
+string wrapping — those only exist inside a CDO form's DFM `Macros.Strings`
+(see the **ih-edit-jfa-forms** skill for that case).
+
+**Editing workflow that has worked reliably:**
+
+1. Split the file on `\r\n`; take line 3, split on `\t`, decode field [5]
+   (`\\([0-9a-f]{2})` → `chr(int(hex,16))`) to a plain `.vbs` file.
+2. Before editing, **re-encode the decoded source and assert it equals the
+   original field** — proves the decode is lossless for this file.
+3. Edit the `.vbs` (it's ordinary VBScript — compile-check it with `cscript`,
+   see the **vb-profile-macros** skill, "Testing macros offline").
+4. Normalise line ends to CRLF, re-encode (`\` → `\5c`, any char < 0x20 →
+   `\%02x`), put it back in field [5], rejoin with tabs/CRLF, write with the
+   BOM.
+5. Read the written file back, decode [5] again and assert it equals the
+   edited source; check the line count (4) and TYPT field count (17).
+6. Keep the previous file as a `.bak`, and update [3] + the file name for
+   the new version.
+
+Always re-decode from the file on disk at the start of each change and diff
+against your last written copy — the user may have edited or re-exported it
+in Profile in between.
 
 ## Field encoding
 
@@ -117,6 +170,18 @@ def jaffa_encode(value: str) -> str:
         else:            out.append(ch)
     return ''.join(out)
 ```
+
+**Trap: DFM text-parser line-length limit.** Independent of field encoding, Profile's DFM text
+parser rejects a physical line (inside field [13]'s embedded DFM, after `\0d\0a` is expanded
+back to real line breaks) above roughly 90 characters with `EParserError: Line too long on line
+N` when the form is opened in the CDO designer. This bites when *regenerating* a long string
+property (e.g. rewriting a `Macros.Strings` entry) as one long unwrapped Pascal string instead of
+wrapping it into `'...' +` continuation lines like the rest of the file. When wrapping, never let
+a physical-line boundary fall in the middle of a `\XX` escape run from the encoding above (e.g.
+splitting `\5c` into `\` + `5c` across the boundary) — the importer's hex-decode pass then hits a
+bare backslash not followed by two hex digits and throws `EConvertError: Invalid hex digit ''`.
+See the **ih-edit-jfa-forms** skill (`Intrahealth-Source/Profile/.claude/skills/`) for the full
+workflow this was hit and fixed in.
 
 ### Null sentinel
 
@@ -258,7 +323,7 @@ The unnamed `TPage` wrapper between `aNoteBook` and `Page_1` is mandatory — om
 | `TICDOEdit` (date variant) | Date input | adds `EditType = edtyDate`, `EditKind = edkdDate`, `ShowButton = ShowBtnFocus`, `ShowButtonStyle = btnStDown` |
 | `TICDOMemo` | Multi-line plain text | `TabOrder` |
 | `TICDORichEdit` | RTF-rich-text input | `InputFormat = ifRTF`, `OutputFormat = ofRTF` |
-| `TICDOSignature` | Signature pad | `Center`, `Proportional`, `SignaturePromptText`, `WhenCaptureSignature = wcsWhenPrinting` |
+| `TICDOSignature` | Signature pad (captures on-screen or via a hardware pad) | `Center`, `Proportional`, `SignaturePromptText`, `WhenCaptureSignature` (`wcsWhenPrinting` or `wcsCustom` — only two values exist). Has **no `OnMClick`** — see "Control scripting capabilities" below for what that means for a "click to sign" UI. |
 | `TICDOCheckBox` | Boolean checkbox | `CheckedValue = 'TRUE'`, `UncheckedValue = 'FALSE'` |
 | `TICDORadioButton` | Radio button | `CheckedValue = 'TRUE'`, `Group = '<group name>'` |
 | `TICDOImage` | Raster overlay | `Picture.Data` is a hex stream prefixed with `0B546478504E47496D616765` (length 11 + `'TdxPNGImage'`), NOT standard `TPngImage` |
@@ -274,6 +339,105 @@ The unnamed `TPage` wrapper between `aNoteBook` and `Page_1` is mandatory — om
 Each input control carries an `HRI = <integer>` property. **HRI is the join key between DFM controls and OBSV field rows: every OBSV field row's `TI=` must match exactly one control's `HRI`.**
 
 Unit definitions for these `TICDO*` controls have not yet been located — almost certainly under `Profile/Common/Form/` or `Profile/Common/Infrastructure/`.
+
+### Control scripting capabilities (validated against source: `Profile/Client/Business/CDO/UBCDOVisualControl.pas`, `Profile/Client/Infrastructure/Scripting/US*.pas`, `Profile/Common/Infrastructure/Scripting/IHProfBL.ridl`)
+
+Every macro-callable control property/method traces to a specific compiled Delphi
+`TS*`/`IS*` scripting class — the DFM/`.jfa` layer only lets you set what that class actually
+exposes. Confirmed facts, so the next form doesn't need to re-derive them from source:
+
+- **`OnMClick` is per-class, not universal.** Confirmed present on `TICDOCheckBox`,
+  `TICDORadioButton`, `TICDOButton`, `TICDOLabel`, `TICDOImage`, `TICDOShape`. Confirmed
+  **absent** on `TICDOSignature` — there is no way to fire a macro by clicking directly on a
+  signature control. Setting `OnMClick` on one in the DFM isn't just ineffective, it throws
+  `EReadError: Property OnMClick does not exist` on import. The practical workaround for a
+  "click here to sign" UI is a normal `TICDOButton` placed next to the signature box, wired to
+  its own `OnMClick`, whose macro calls `Form.Controls_("SigControlName").CaptureSignature(aRtf)`.
+- **Generic `ISControl` properties** (available on every control via `Form.Controls_("Name")`,
+  from `Profile/Client/Infrastructure/Scripting/USControl.pas`): `Caption`, `Color`, `Enabled`,
+  `Font`, `Height`/`Width`/`Left`/`Top`, `Hint`, `IsModified`, `IsVisible`, `Text`, `Tag`,
+  `ParentColor`/`ParentFont`, `ShowHint`. `Text` is meaningful for `TICDOEdit`/`TICDOComboBox`
+  (backed by a real natural text property); it is **not verified safe for `TImage`-descended
+  controls** like `TICDOSignature` (no natural `.Text`, and the fallback path in
+  `TSControl.Get_Text`/`Set_Text` casts to a generic `TControl.Text` that a `TImage` doesn't
+  meaningfully have) — don't rely on it for signature controls without testing against a real
+  Profile.exe build first.
+- **`IsModified` means "changed in the current editing session", not "has a persisted
+  value".** Confirmed via `TIDataLink.FlowData(hfdFromHRI)` (`Profile/Client/Interface/CDO/
+  UICDO_VisualForm.pas`): loading a saved field's value from the database into its bound
+  control only calls `VCQ_SetValue`, never `VCQ_SetModified`. So on reopening an existing
+  record, every control's `IsModified` reads `False` regardless of whether it holds real
+  saved data — it only goes `True` again if the user actually edits/re-captures it in *this*
+  session. Do not use `IsModified` in a macro to detect "this field already has a value" for
+  an existing record; use the control's own value instead where one is generically readable
+  (e.g. `.Text <> ""` for edits/combos, `.Checked` for checkboxes/radio buttons — both of
+  those genuinely do reflect the flowed-in persisted value). There is no generic "has a
+  value"/"IsEmpty" check for image-based controls (signatures) at all — see below.
+- **`hfdToHRI` (save/flow-out) does not check `Visible`.** For a *new* record
+  (`Form.IsNew`), every control's current value is written regardless of whether the control
+  is hidden or was ever touched — the only skip condition applies to *existing* records
+  (`not aForm.isNew`) and only when a control is *both* unmodified *and* the form isn't new.
+  Practically: toggling `.Isvisible` to hide one branch of a form (e.g. switching a
+  radio-driven "Written vs Verbal consent" layout) does **not** stop whatever was already
+  entered/captured in the now-hidden branch from being saved. If mutually-exclusive branches
+  must not both persist, you need either a real clear operation on every affected control
+  (not always available — see the signature note below) or a save-time guard that refuses to
+  save when more than one branch shows data, plus clearing whatever *is* clearable (e.g. text
+  fields via `.Text = ""`) when the branch selection changes.
+- **`TICDOSignature`'s full scriptable interface (`ISSignature: ISControl`, from the `.ridl`)
+  is exactly three members: `SignaturePromptText`, `WhenCaptureSignature`,
+  `CaptureSignature`.** No `Clear`/`Reset` method exists at the scripting layer. The only way
+  to erase a captured signature is the control's own built-in right-click "Clear Signature"
+  popup-menu item — compiled directly into `TICDOSignature.InitPopupMenu`/`DoClearClick`, not
+  reachable from a macro. If a workflow needs "switching X clears signature Y", the honest
+  answer given current Profile.exe is: it can't be done from the `.jfa`/macro layer; only a
+  save-time guard (checking `IsModified`, since within one session it *does* correctly flag
+  "captured this session") can stop the bad state from being persisted.
+  - `CaptureSignature(out aSignatureRtfText): Integer` pops either a software (mouse/touch,
+    `TICaptureSignatureDlg`) or hardware (Topaz pad) capture dialog depending on the practice's
+    `PracticePreferences.SignaturePad` setting, and returns `0` success / `1` user-cancelled /
+    `2` not-connected-or-unlicensed / `3` other error. Calling it from a macro (e.g. a button's
+    `OnMClick`) works independently of the "prompt when printing" preference below — it only
+    needs SRFax configured or the Telemedicine/eSignature module licensed.
+  - `WhenCaptureSignature` has exactly two values: `wcsWhenPrinting` (the only one that
+    self-triggers — `TIVisualForm.BeforePrintEx` loops every `ISSignature` on the form and
+    calls `CaptureSignature` automatically, but only while `VisibleWhenPrint = True` *and* the
+    per-workstation "Signature Pad" preference is enabled under **Practice Preferences → Device
+    Interfaces → Signature Pad tab → "Printing Forms with Signature Control(s)"**) and
+    `wcsCustom` (no automatic trigger at all — capture only happens if a macro explicitly calls
+    `.CaptureSignature`). Setting it to `wcsCustom` is the correct way to stop the print-time
+    "please sign" prompt once a form has its own on-screen "Click to Sign" button and
+    save-time mandatory-signature validation.
+  - `AssignPicture` (what `CaptureSignature` calls internally to store the captured bitmap)
+    does **not** call `Invalidate`/`Repaint`. The signature visually stays stale on screen
+    until something else forces a native repaint (e.g. scrolling the control off-screen and
+    back). Fix from a macro: immediately after calling `CaptureSignature`, toggle
+    `Form.Controls_("Sig").Isvisible = False` then back to `True` — going from invisible to
+    visible reliably forces VCL to repaint, picking up the freshly-assigned picture.
+  - `TImage.Transparent = True` on a `TICDOSignature` does **not** make the blank/white parts
+    of a captured signature see-through over whatever's underneath — confirmed by live testing,
+    not just reading. VCL's `TImage.Transparent` only works if the underlying bitmap *also*
+    defines a `TransparentColor`, and the signature-capture pipeline (`CaptureSignature` →
+    `AssignPicture`) never sets one on the captured `TBitmap` — it's just solid opaque white as
+    far as VCL is concerned. This can't be fixed from the `.jfa`; it would need a Profile.exe
+    source change to the capture pipeline itself. Don't set `Transparent = True` expecting it
+    to help with a signature box overlapping an auto-sized label — instead give the layout more
+    clearance (move/narrow the overlapping controls).
+- **Root-form macro events (`OnMPreload`, `OnMValidateSave`, `OnMBeforePrint`,
+  `OnMAfterSave`, etc.) are real `TIVisualForm` properties that must be explicitly set to a
+  macro name string, plus a matching named item added to `Macros.Strings`.** The boilerplate
+  `FormValidateSave=`/`FormPreloadMacro=`/etc. entries baked into every template's
+  `Macros.Strings` (copied verbatim from `Form_Template_-_Form.jfa`, see "Root form properties"
+  above) are **not live handlers** — they're just descriptive text the CDO designer displays as
+  IDE help when a user picks that macro slot from a dropdown. A template that has never had
+  save-time validation wired up will have that comment text present but `OnMValidateSave` left
+  unset entirely; wiring it up means adding both the property (`OnMValidateSave =
+  'YourMacroName'`) *and* a brand-new `YourMacroName=...` item to the array.
+- **`ValidateSaveFormMacro` (the code that actually invokes `OnMValidateSave`) short-circuits
+  entirely** — `if not isModified(True) and not isNew then exit` — when the form as a whole is
+  unmodified and not new. Opening an existing record and hitting Save without changing anything
+  never runs your validate-save macro at all in that case; this only matters if you need
+  validation to catch a resave-with-no-changes scenario (it won't).
 
 ## Reading existing JFAs
 

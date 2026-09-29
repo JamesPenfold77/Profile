@@ -6,13 +6,15 @@ Reusable knowledge documents capturing hard-won lessons from Profile EMR develop
 
 ### CDO Forms
 
-- **[jfa-format](jfa-format/SKILL.md)** — the JFA file format used by Profile's CDO Forms system. Record types (HEAD/LNVR/OBSV), field positions per record, the 4 OBSV class codes, jaffa value encoding, the embedded DFM payload, the control palette. Source-level Pascal references plus empirically-validated facts from real imports.
+- **[jfa-format](jfa-format/SKILL.md)** — the JFA file format used by Profile's CDO Forms system. Record types (HEAD/LNVR/OBSV), field positions per record, the 4 OBSV class codes, jaffa value encoding, the embedded DFM payload, the control palette. Also macro exports (TYPT records) and their decode/edit/re-encode workflow. Source-level Pascal references plus empirically-validated facts from real imports.
 
 - **[pdf-to-jfa-generator](pdf-to-jfa-generator/SKILL.md)** — the Python pipeline at `generators/pdf_to_jfa/` that produces JFA files from PDFs (or from scratch). Architecture, the calibration loop, recipes for adding new forms, common failure modes. Pairs with the **jfa-format** skill.
 
 ### Profile development
 
-- **[vb-profile-macros](vb-profile-macros/SKILL.md)** — Profile EMR VBScript / VB macro development. The `IHProfBL` COM type library, `ISProfile` global object, common patterns (provider group resolution, slot-availability detection, modal progress with cancel).
+- **[vb-profile-macros](vb-profile-macros/SKILL.md)** — Profile EMR VBScript / VB macro development. The `IHProfBL` COM type library, `ISProfile` global object, common patterns (provider group resolution, slot-availability detection, modal progress with cancel), sharing code via `ExecuteGlobal`, offline testing with `cscript`, and building/validating XML with MSXML.
+
+- **[dex-reporting](dex-reporting/SKILL.md)** — Generating the DSS Data Exchange (DEX) upload XML from Profile (DEXREPORT / DEXLOADORG macros) and diagnosing DEX rejections: XSD sequence order, OrganisationData.xml requirement codes, common errors and fixes, PHI-safe anonymised output.
 
 - **[profile-integration-design](profile-integration-design/SKILL.md)** — Integration design patterns for Profile (server-side vs. macro-based options, JIRA IDEA structure, etc.)
 
