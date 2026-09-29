@@ -893,6 +893,10 @@ Set aProvider = Profile.LoadProvider(aRule.ProviderID)
 
 ## 5. Profile Type Library — Stored Query API
 
+The query definitions themselves can be exported as `.ihq` files and read with the
+**ihq-stored-query-format** skill. Each `?ask?` condition, in order, is `Parameters(n)`
+below, and the Select order is the column order of the output file.
+
 ```vb
 Dim aFilter
 Set aFilter = Profile.MakeFindObjectQueriesLoader()

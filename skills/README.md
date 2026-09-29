@@ -14,6 +14,8 @@ Reusable knowledge documents capturing hard-won lessons from Profile EMR develop
 
 - **[vb-profile-macros](vb-profile-macros/SKILL.md)** — Profile EMR VBScript / VB macro development. The `IHProfBL` COM type library, `ISProfile` global object, common patterns (provider group resolution, slot-availability detection, modal progress with cancel), sharing code via `ExecuteGlobal`, offline testing with `cscript`, and building/validating XML with MSXML.
 
+- **[ihq-stored-query-format](ihq-stored-query-format/SKILL.md)** — Reading Profile stored-query (`.ihq`) exports: the Delphi binary layout, the Select / Conditions / Common records, `?ask?` run-time parameters, a checklist for reviewing queries, and a working decoder (`ihq_decode.py`).
+
 - **[dex-reporting](dex-reporting/SKILL.md)** — Generating the DSS Data Exchange (DEX) upload XML from Profile (DEXREPORT / DEXLOADORG macros) and diagnosing DEX rejections: XSD sequence order, OrganisationData.xml requirement codes, common errors and fixes, PHI-safe anonymised output.
 
 - **[profile-integration-design](profile-integration-design/SKILL.md)** — Integration design patterns for Profile (server-side vs. macro-based options, JIRA IDEA structure, etc.)

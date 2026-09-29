@@ -24,7 +24,17 @@ activity to DSS.
 
 Settings are at the top of DEXREPORT_TEST's `Main`: `aQueryName` (which FOQ),
 `aStartdate`/`aEnddate`, `bVerbose` (Info log lines on/off), `iOutputMode`
-(1 real file, 2 anonymised file, 3 both). Paths switch on
+(1 real file, 2 anonymised file, 3 both).
+
+The stored queries ("Dex Items for ..." in Profile's Stored Query view, **NDIS**
+folder) take just the two dates and **include the start date, exclude the end
+date** — a month is `#01-Jul-2026#` to `#01-Aug-2026#`; ending on the 31st
+drops that day. "Dex Items - One Case" is the debugging query: same two date
+parameters, and the user adds their own conditions (file number, case number)
+in the query itself to restrict the output. To review the queries' Case Type
+lists and column order, decode the `.ihq` exports with the
+**ihq-stored-query-format** skill. The Sep 2026 review found CHSPSSS and
+FMHSSCLON in no query. Paths switch on
 `Profile.CurrentUserCode` (a developer's local paths vs `H:\`), in both
 DEXREPORT_TEST and DEXLOADORG_TEST — check both when a run reads or writes the
 wrong place. Output name: `DEX-TEST-<query name> <yyyy-mm-dd HHMM>.xml`.
