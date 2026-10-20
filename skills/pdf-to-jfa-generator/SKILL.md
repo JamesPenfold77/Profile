@@ -148,6 +148,12 @@ Strategy 1 is the default; strategy 2 needs a `FormPreloadMacro` filled in. Don'
 
 ## Adding a new form
 
+**Style choice: ask first.** There is an optional "modern" form style (Segoe UI, blue header
+bar, rounded section cards, rounded icon buttons), described in the **jfa-format** skill under
+"Optional modern form style". Before building a new form, ask the user whether they want it.
+Usually it does **not** suit a pixel-perfect PDF replica, since those must look like the paper
+original. It suits macro-driven tool screens better. Don't apply it without a yes.
+
 ### 1. Write a form layout module
 
 `forms/<form_name>.py`:

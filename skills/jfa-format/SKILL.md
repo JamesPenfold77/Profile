@@ -1,3 +1,8 @@
+---
+name: jfa-format
+description: The Profile JFA (Jaffa) file format - HEAD/LNVR/OBSV/TYPT records, field encoding, the CDO form DFM, control palette and scripting limits, and the optional "modern" form style (header bar, cards, rounded buttons and input frames) with preview and layout-check tools. Use when reading, generating or restyling a .jfa form or macro export.
+---
+
 # Skill: JFA (Jaffa) File Format
 
 Status: **partially validated** — earlier source-reading combined with empirical validation against a working CDO Form sample (April 2026). The first-pass pipeline at `generators/pdf_to_jfa/` produces JFA files that import cleanly into Profile EMR (Hello World form + Pelvic Floor consent form, both validated end-to-end). Remaining unknowns are in "Open questions" at the end.
@@ -62,6 +67,8 @@ The exact contents of this table per line type are defined in `UBJaffaFileDeclar
 | `LNVR` | 3 |  6 | Line versions block — declares `(lineCode, version)` pairs the body uses |
 | `OBSV` | 2 | 44 | The "observation" workhorse line — used for both data observations and form-template definitions |
 | `SHRS` | 2 |  ? | Declared in LNVR but not used in any sample we've decoded |
+| `TYPT` | 3 | 17 | A macro ("Typing Template") — one line holds a whole macro's VBScript. See "Macro (TYPT) files" below |
+| `SCTP` / `SHTC` | 3 | – / 30 | Shortcode Type / Shortcode lookup records (e.g. the `CaseType Reason Mapping` export). SHTC field layout is in the **vb-profile-macros** skill |
 
 ### HEAD line layout (validated)
 
@@ -88,6 +95,57 @@ The exact contents of this table per line type are defined in `UBJaffaFileDeclar
 `LNVR \t 3 \t OBSV \t 2 \t SHRS \t 2`
 
 Constant across all samples — emit verbatim.
+
+(That's the CDO-form LNVR. Other file types declare their own record types,
+e.g. `LNVR \t 3 \t TYPT \t 3` for a macro, `LNVR \t 3 \t SCTP \t 3 \t SHTC \t 3`
+for a shortcode lookup.)
+
+## Macro (TYPT) files (validated, round-tripped many times on DEXREPORT_TEST)
+
+A macro exported from Profile, e.g.
+`Macro - (DEXREPORT_TEST) Generate Dex Report as XML file (TEST v11.15 - ...).jfa`,
+is a 4-line file (UTF-8 BOM, CRLF line ends, tab-delimited):
+
+```
+HEAD  3  4  TYPT  Typing Templates  Intrahealth  dd/mm/yyyy  HH.MM  M      F ...
+LNVR  3  TYPT  3
+TYPT  3  <MacroCode>  <Description>  (blank)  <MacroSource>  0  0  ...   (17 fields)
+(empty line)
+```
+
+| TYPT field | Meaning |
+|---|---|
+| [2] | Macro code, e.g. `DEXREPORT_TEST` — what `Profile.LoadShortCodeByCodeType(code, 10)` looks up |
+| [3] | Description shown in Profile's macro list — keep it in step with the file name and version (see the **vb-profile-macros** skill, "Macro file name and description track the version") |
+| [5] | The whole VBScript source, Jaffa-encoded (see "Field encoding" below) |
+
+**This is much simpler than a CDO form's embedded macros.** The source in
+[5] is plain VBScript with only the standard `\xx` field encoding: real CRLFs
+are `\0d\0a`, tabs `\09`, and every literal backslash `\5c` (so the VBScript
+`\` integer-division operator, Windows paths like `C:\Temp`, etc. all appear
+as `\5c`). There is **no** `^^^` newline marker and **no** Pascal `'...' +`
+string wrapping — those only exist inside a CDO form's DFM `Macros.Strings`
+(see the **ih-edit-jfa-forms** skill for that case).
+
+**Editing workflow that has worked reliably:**
+
+1. Split the file on `\r\n`; take line 3, split on `\t`, decode field [5]
+   (`\\([0-9a-f]{2})` → `chr(int(hex,16))`) to a plain `.vbs` file.
+2. Before editing, **re-encode the decoded source and assert it equals the
+   original field** — proves the decode is lossless for this file.
+3. Edit the `.vbs` (it's ordinary VBScript — compile-check it with `cscript`,
+   see the **vb-profile-macros** skill, "Testing macros offline").
+4. Normalise line ends to CRLF, re-encode (`\` → `\5c`, any char < 0x20 →
+   `\%02x`), put it back in field [5], rejoin with tabs/CRLF, write with the
+   BOM.
+5. Read the written file back, decode [5] again and assert it equals the
+   edited source; check the line count (4) and TYPT field count (17).
+6. Keep the previous file as a `.bak`, and update [3] + the file name for
+   the new version.
+
+Always re-decode from the file on disk at the start of each change and diff
+against your last written copy — the user may have edited or re-exported it
+in Profile in between.
 
 ## Field encoding
 
@@ -117,6 +175,18 @@ def jaffa_encode(value: str) -> str:
         else:            out.append(ch)
     return ''.join(out)
 ```
+
+**Trap: DFM text-parser line-length limit.** Independent of field encoding, Profile's DFM text
+parser rejects a physical line (inside field [13]'s embedded DFM, after `\0d\0a` is expanded
+back to real line breaks) above roughly 90 characters with `EParserError: Line too long on line
+N` when the form is opened in the CDO designer. This bites when *regenerating* a long string
+property (e.g. rewriting a `Macros.Strings` entry) as one long unwrapped Pascal string instead of
+wrapping it into `'...' +` continuation lines like the rest of the file. When wrapping, never let
+a physical-line boundary fall in the middle of a `\XX` escape run from the encoding above (e.g.
+splitting `\5c` into `\` + `5c` across the boundary) — the importer's hex-decode pass then hits a
+bare backslash not followed by two hex digits and throws `EConvertError: Invalid hex digit ''`.
+See the **ih-edit-jfa-forms** skill (`Intrahealth-Source/Profile/.claude/skills/`) for the full
+workflow this was hit and fixed in.
 
 ### Null sentinel
 
@@ -258,7 +328,7 @@ The unnamed `TPage` wrapper between `aNoteBook` and `Page_1` is mandatory — om
 | `TICDOEdit` (date variant) | Date input | adds `EditType = edtyDate`, `EditKind = edkdDate`, `ShowButton = ShowBtnFocus`, `ShowButtonStyle = btnStDown` |
 | `TICDOMemo` | Multi-line plain text | `TabOrder` |
 | `TICDORichEdit` | RTF-rich-text input | `InputFormat = ifRTF`, `OutputFormat = ofRTF` |
-| `TICDOSignature` | Signature pad | `Center`, `Proportional`, `SignaturePromptText`, `WhenCaptureSignature = wcsWhenPrinting` |
+| `TICDOSignature` | Signature pad (captures on-screen or via a hardware pad) | `Center`, `Proportional`, `SignaturePromptText`, `WhenCaptureSignature` (`wcsWhenPrinting` or `wcsCustom` — only two values exist). Has **no `OnMClick`** — see "Control scripting capabilities" below for what that means for a "click to sign" UI. |
 | `TICDOCheckBox` | Boolean checkbox | `CheckedValue = 'TRUE'`, `UncheckedValue = 'FALSE'` |
 | `TICDORadioButton` | Radio button | `CheckedValue = 'TRUE'`, `Group = '<group name>'` |
 | `TICDOImage` | Raster overlay | `Picture.Data` is a hex stream prefixed with `0B546478504E47496D616765` (length 11 + `'TdxPNGImage'`), NOT standard `TPngImage` |
@@ -274,6 +344,208 @@ The unnamed `TPage` wrapper between `aNoteBook` and `Page_1` is mandatory — om
 Each input control carries an `HRI = <integer>` property. **HRI is the join key between DFM controls and OBSV field rows: every OBSV field row's `TI=` must match exactly one control's `HRI`.**
 
 Unit definitions for these `TICDO*` controls have not yet been located — almost certainly under `Profile/Common/Form/` or `Profile/Common/Infrastructure/`.
+
+### Control scripting capabilities (validated against source: `Profile/Client/Business/CDO/UBCDOVisualControl.pas`, `Profile/Client/Infrastructure/Scripting/US*.pas`, `Profile/Common/Infrastructure/Scripting/IHProfBL.ridl`)
+
+Every macro-callable control property/method traces to a specific compiled Delphi
+`TS*`/`IS*` scripting class — the DFM/`.jfa` layer only lets you set what that class actually
+exposes. Confirmed facts, so the next form doesn't need to re-derive them from source:
+
+- **`OnMClick` is per-class, not universal.** Confirmed present on `TICDOCheckBox`,
+  `TICDORadioButton`, `TICDOButton`, `TICDOLabel`, `TICDOImage`, `TICDOShape`. Confirmed
+  **absent** on `TICDOSignature` — there is no way to fire a macro by clicking directly on a
+  signature control. Setting `OnMClick` on one in the DFM isn't just ineffective, it throws
+  `EReadError: Property OnMClick does not exist` on import. The practical workaround for a
+  "click here to sign" UI is a normal `TICDOButton` placed next to the signature box, wired to
+  its own `OnMClick`, whose macro calls `Form.Controls_("SigControlName").CaptureSignature(aRtf)`.
+- **Generic `ISControl` properties** (available on every control via `Form.Controls_("Name")`,
+  from `Profile/Client/Infrastructure/Scripting/USControl.pas`): `Caption`, `Color`, `Enabled`,
+  `Font`, `Height`/`Width`/`Left`/`Top`, `Hint`, `IsModified`, `IsVisible`, `Text`, `Tag`,
+  `ParentColor`/`ParentFont`, `ShowHint`. `Text` is meaningful for `TICDOEdit`/`TICDOComboBox`
+  (backed by a real natural text property); it is **not verified safe for `TImage`-descended
+  controls** like `TICDOSignature` (no natural `.Text`, and the fallback path in
+  `TSControl.Get_Text`/`Set_Text` casts to a generic `TControl.Text` that a `TImage` doesn't
+  meaningfully have) — don't rely on it for signature controls without testing against a real
+  Profile.exe build first.
+- **`IsModified` means "changed in the current editing session", not "has a persisted
+  value".** Confirmed via `TIDataLink.FlowData(hfdFromHRI)` (`Profile/Client/Interface/CDO/
+  UICDO_VisualForm.pas`): loading a saved field's value from the database into its bound
+  control only calls `VCQ_SetValue`, never `VCQ_SetModified`. So on reopening an existing
+  record, every control's `IsModified` reads `False` regardless of whether it holds real
+  saved data — it only goes `True` again if the user actually edits/re-captures it in *this*
+  session. Do not use `IsModified` in a macro to detect "this field already has a value" for
+  an existing record; use the control's own value instead where one is generically readable
+  (e.g. `.Text <> ""` for edits/combos, `.Checked` for checkboxes/radio buttons — both of
+  those genuinely do reflect the flowed-in persisted value). There is no generic "has a
+  value"/"IsEmpty" check for image-based controls (signatures) at all — see below.
+- **`hfdToHRI` (save/flow-out) does not check `Visible`.** For a *new* record
+  (`Form.IsNew`), every control's current value is written regardless of whether the control
+  is hidden or was ever touched — the only skip condition applies to *existing* records
+  (`not aForm.isNew`) and only when a control is *both* unmodified *and* the form isn't new.
+  Practically: toggling `.Isvisible` to hide one branch of a form (e.g. switching a
+  radio-driven "Written vs Verbal consent" layout) does **not** stop whatever was already
+  entered/captured in the now-hidden branch from being saved. If mutually-exclusive branches
+  must not both persist, you need either a real clear operation on every affected control
+  (not always available — see the signature note below) or a save-time guard that refuses to
+  save when more than one branch shows data, plus clearing whatever *is* clearable (e.g. text
+  fields via `.Text = ""`) when the branch selection changes.
+- **`TICDOSignature`'s full scriptable interface (`ISSignature: ISControl`, from the `.ridl`)
+  is exactly three members: `SignaturePromptText`, `WhenCaptureSignature`,
+  `CaptureSignature`.** No `Clear`/`Reset` method exists at the scripting layer. The only way
+  to erase a captured signature is the control's own built-in right-click "Clear Signature"
+  popup-menu item — compiled directly into `TICDOSignature.InitPopupMenu`/`DoClearClick`, not
+  reachable from a macro. If a workflow needs "switching X clears signature Y", the honest
+  answer given current Profile.exe is: it can't be done from the `.jfa`/macro layer; only a
+  save-time guard (checking `IsModified`, since within one session it *does* correctly flag
+  "captured this session") can stop the bad state from being persisted.
+  - `CaptureSignature(out aSignatureRtfText): Integer` pops either a software (mouse/touch,
+    `TICaptureSignatureDlg`) or hardware (Topaz pad) capture dialog depending on the practice's
+    `PracticePreferences.SignaturePad` setting, and returns `0` success / `1` user-cancelled /
+    `2` not-connected-or-unlicensed / `3` other error. Calling it from a macro (e.g. a button's
+    `OnMClick`) works independently of the "prompt when printing" preference below — it only
+    needs SRFax configured or the Telemedicine/eSignature module licensed.
+  - `WhenCaptureSignature` has exactly two values: `wcsWhenPrinting` (the only one that
+    self-triggers — `TIVisualForm.BeforePrintEx` loops every `ISSignature` on the form and
+    calls `CaptureSignature` automatically, but only while `VisibleWhenPrint = True` *and* the
+    per-workstation "Signature Pad" preference is enabled under **Practice Preferences → Device
+    Interfaces → Signature Pad tab → "Printing Forms with Signature Control(s)"**) and
+    `wcsCustom` (no automatic trigger at all — capture only happens if a macro explicitly calls
+    `.CaptureSignature`). Setting it to `wcsCustom` is the correct way to stop the print-time
+    "please sign" prompt once a form has its own on-screen "Click to Sign" button and
+    save-time mandatory-signature validation.
+  - `AssignPicture` (what `CaptureSignature` calls internally to store the captured bitmap)
+    does **not** call `Invalidate`/`Repaint`. The signature visually stays stale on screen
+    until something else forces a native repaint (e.g. scrolling the control off-screen and
+    back). Fix from a macro: immediately after calling `CaptureSignature`, toggle
+    `Form.Controls_("Sig").Isvisible = False` then back to `True` — going from invisible to
+    visible reliably forces VCL to repaint, picking up the freshly-assigned picture.
+  - `TImage.Transparent = True` on a `TICDOSignature` does **not** make the blank/white parts
+    of a captured signature see-through over whatever's underneath — confirmed by live testing,
+    not just reading. VCL's `TImage.Transparent` only works if the underlying bitmap *also*
+    defines a `TransparentColor`, and the signature-capture pipeline (`CaptureSignature` →
+    `AssignPicture`) never sets one on the captured `TBitmap` — it's just solid opaque white as
+    far as VCL is concerned. This can't be fixed from the `.jfa`; it would need a Profile.exe
+    source change to the capture pipeline itself. Don't set `Transparent = True` expecting it
+    to help with a signature box overlapping an auto-sized label — instead give the layout more
+    clearance (move/narrow the overlapping controls).
+- **Root-form macro events (`OnMPreload`, `OnMValidateSave`, `OnMBeforePrint`,
+  `OnMAfterSave`, etc.) are real `TIVisualForm` properties that must be explicitly set to a
+  macro name string, plus a matching named item added to `Macros.Strings`.** The boilerplate
+  `FormValidateSave=`/`FormPreloadMacro=`/etc. entries baked into every template's
+  `Macros.Strings` (copied verbatim from `Form_Template_-_Form.jfa`, see "Root form properties"
+  above) are **not live handlers** — they're just descriptive text the CDO designer displays as
+  IDE help when a user picks that macro slot from a dropdown. A template that has never had
+  save-time validation wired up will have that comment text present but `OnMValidateSave` left
+  unset entirely; wiring it up means adding both the property (`OnMValidateSave =
+  'YourMacroName'`) *and* a brand-new `YourMacroName=...` item to the array.
+- **`ValidateSaveFormMacro` (the code that actually invokes `OnMValidateSave`) short-circuits
+  entirely** — `if not isModified(True) and not isNew then exit` — when the form as a whole is
+  unmodified and not new. Opening an existing record and hitting Save without changing anything
+  never runs your validate-save macro at all in that case; this only matters if you need
+  validation to catch a resave-with-no-changes scenario (it won't).
+
+## Optional "modern" form style — offer it, ask before using
+
+James approved a web-page-like style for the QCG Demographic Information form ("Client Form
+Update", Oct 2026). **When creating a new form (or doing a substantial redesign), offer this
+style and ask the user before applying it.** Don't apply it by default and don't restyle an
+existing form unasked. It isn't always appropriate:
+
+- **Good fit:** tool or utility forms driven by macros (review/compare/update screens, launchers,
+  dashboards), and forms opened from a toolbar button rather than printed.
+- **Usually not a fit:**
+  - Forms that must look like a paper original, such as consent forms built with the
+    pixel-perfect PDF overlay (see the **pdf-to-jfa-generator** skill).
+  - Forms that are mainly printed.
+  - Forms that must match a customer's existing set of forms.
+  - Very dense data-entry forms, where cards cost too much vertical space.
+- When asking, name what it involves (Segoe UI, a blue header bar, section cards, rounded icon
+  buttons, orange difference highlighting) so the user can pick parts of it.
+
+**Reference implementations** — copy their DFM blocks rather than reinventing them:
+
+- `Profile/Customers/QCG/Form Template - Demographic Information.jfa` (V 1.0.7 JP): header bar,
+  section cards, rounded buttons, difference highlighting. A wide review/compare layout.
+- `Profile/Customers/Hauora Waikato/Way Back Phone Client V1.5.6.jfa` (Oct 2026): a small
+  data-entry form. Adds rounded input frames, a header icon glyph, a white secondary button,
+  and field labels in the heading style. It was made by generating the whole `Page_1` control
+  tree from a short Python list (small `shape()`/`label()`/`button()` helpers that emit
+  `object ... end` blocks) and splicing it into the decoded DFM, leaving `Macros.Strings`
+  untouched. For a full restyle that is easier to adjust than hand-editing every control.
+
+### Elements
+
+| Element | How it's built |
+|---|---|
+| Font | Root form `Font.Name = 'Segoe UI'`, `Font.Height = -12`, plus `Font.Charset`, `Font.Color` and `Font.Style`. Every control with `ParentFont = False` must also get `Font.Name` and `Font.Height`, or it falls back to the old default. Use `'Segoe UI Semibold'` for headings and button text. |
+| Header bar | A full-width `TICDOShape` (`FillColor` = `BorderColor` = `$00EB6325`, i.e. #2563EB, Height 44) at the top. The title label sits on it with `ParentColor = False`, `Color = $00EB6325`, `Font.Color = clWhite`, `Font.Height = -20`, Semibold. |
+| Section cards | A `TICDOShape` with `Shape = stRoundRect`, `FillColor = clWhite`, `BorderColor = $00E2DDD9` (#D9DDE2). Each card has a blue Semibold heading label, then rows 22 px apart. Gap of 12 px between cards. |
+| Rounded button | Three controls, **each with the same `OnMClick`**: a `TICDOShape` (`stRoundRect`, blue, Height 28); an icon `TICDOLabel` (`Font.Name = 'Segoe MDL2 Assets'`, `Caption = #<glyph>`, e.g. `#59194` = U+E73A checklist, `#59214` = U+E74E save); and a text `TICDOLabel`. Both labels have `ParentColor = False`, `Color = $00EB6325`, white Semibold font, `AutoSize = False`. Use plain ASCII captions plus `#NNNNN` for glyphs; don't put raw non-ASCII in the DFM. |
+| Secondary button | Same three controls as the rounded button, but `FillColor = clWhite`, `BorderColor = $00E2DDD9`, labels `Color = clWhite`, text `Font.Color = $00404040`. Use it for Cancel next to a blue OK. Glyphs: `#59214` (U+E74E save) for OK, `#59153` (U+E711 cancel) for Cancel. |
+| Header icon | A `TICDOLabel` on the header bar with `Font.Name = 'Segoe MDL2 Assets'`, `Font.Height = -18`, white, `ParentColor = False`, `Color = $00EB6325`, `AutoSize = False`, e.g. `#59159` (U+E717 phone). Replace small grey icon `TICDOImage`s with a glyph like this: a JPEG/PNG with a light background shows as a box on the blue bar. Put the title label 30 px further right. |
+| Rounded input frame | Set the `TICDOEdit`/`TICDOMemo` to `BorderStyle = bsNone`, `Color = clWhite`, then put a `TICDOShape` (`stRoundRect`, `FillColor = clWhite`, `BorderColor = $00AFA39C` i.e. #9CA3AF, slightly darker than card borders) **behind** it, 5 px bigger left/top and about 4 px right/bottom. Name frames `shpFrm<Field>`. For a single-line edit: frame Height 25, edit Height 17, edit Top = frame Top + 4. Works for lookup (`edtyLookup`) and date edits — their button draws inside the frame. Not for radio buttons and checkboxes (they draw their own marks). |
+| Field labels (option) | Default is bold Segoe UI -12 black (`Font.Style = [fsBold]`). Alternative the Way Back form uses: the section-heading style without bold — `Font.Name = 'Segoe UI Semibold'`, `Font.Height = -13`, `Font.Color = $00EB6325`, Height 17, Top 1 px above the old row Top. Measure caption widths (e.g. with Pillow and `seguisb.ttf` at 13 px) so the longest label ends before the input column. |
+| Difference highlight | Done at runtime: `Form.Controls_("x").FontColor = &H000C58EA` (#EA580C orange) or `&H80000008` (clWindowText). `FontColor` is a generic `ISControl` property. |
+| Save prompt | For a tool form that stores no data of its own, set root `NeedToSave = False` so closing it doesn't ask to save. Not for forms that record data. |
+
+### Constraints that shape the style (from the CDO control source)
+
+- **`TICDOButton` can't be styled.** It's a plain VCL `TButton`: no icon, no colour, square
+  corners. That's why rounded buttons are a shape plus labels. `TICDOShape`, `TICDOLabel` and
+  `TICDOImage` all support `OnMClick`.
+- **Labels are never transparent.** `TILabel` forces `Transparent := False` and doesn't publish
+  it. Any label on a coloured shape must set `ParentColor = False` and `Color` to the shape's
+  fill, or a rectangle shows. On white cards over a white page nothing extra is needed.
+- **`TICDOCheckBox` has no published `Color`.** Checkboxes keep the page background, so
+  alternating row shading and coloured cards behind checkboxes don't work. Keep cards white.
+- **Z-order is DFM order.** Shapes and labels are graphic controls; later in the DFM means
+  drawn on top. Put the header and card shapes before the controls on them. Windowed controls
+  (checkboxes, edits) always draw above graphic ones.
+- A `TICDOImage` PNG button (picture with rounded corners) is the other option. It's the most
+  web-like, but the text is baked into the image, and it has no hover, focus or tab order.
+- Segoe UI and Segoe MDL2 Assets ship with Windows 10/11. On an older OS, icons show as empty
+  squares.
+- **Rounded buttons can't be reached with Tab or Enter.** Shapes and labels aren't windowed, so
+  they take no focus. Tell the user when replacing `TICDOButton`s on a keyboard-heavy form.
+- **`TShape` has no radius property.** VCL draws `stRoundRect` with a corner ellipse
+  `min(Width, Height) div 4` wide, so the radius is about 1/8 of the shorter side. Cards and
+  big memos look clearly rounded; a 25 px input frame only gets about 3 px corners.
+- **A windowed control always draws over a frame.** Any edit/memo that overlaps another field's
+  frame hides part of that frame's border (e.g. a borderless Case edit 1 px into the Contact
+  details frame below it). Keep every windowed control either fully inside its own frame or
+  clear of all frames.
+- **A borderless edit's text sits at the top-left of its area.** That's why the edit is shorter
+  than its frame. Ask the user to check vertical centring in the designer.
+- **Clicks on a frame's margin don't reach the edit.** Keep margins small (4-5 px).
+- **Focus highlight is only partly possible.** `ISShape.BorderColor`/`BorderWidth` can be set
+  from a macro, and `TICDOEdit`/`TICDOComboBox` have `OnMEnter`, but there's no `OnMExit` and
+  `TICDOMemo` has neither. A "blue frame on the focused field" can only be cleared when the next
+  edit is entered. Leave it out unless the user asks.
+- **`gblMarkOut` (GLBLFORMS) paints a label with the practice's mandatory-field colour**
+  (`Profile.SystemPreference("Workspace.MandatoryFieldColor")`, usually yellow) by setting the
+  control's `Color`. It clashes with this style. Remove the call and do the mandatory check in
+  the OK/validate macro instead — it only changes colour, nothing else depends on it.
+
+### When generating
+
+- **Tools** (in `Profile/skills/jfa-format/tools/`, need Python + Pillow + the Windows Segoe
+  fonts):
+  - `python -I jfa_preview.py <form.jfa> [out.png]` draws an approximate PNG of the form's
+    first page, with control names as placeholder text (no data). Use it to check the look
+    and show the user before they import. It is not exact (text baselines, lookup buttons,
+    themes), so still ask them to check in the CDO designer.
+  - `python -I jfa_layout_check.py <form.jfa>` exits 1 and lists problems: controls outside the
+    form, row controls straddling a card edge, overlapping controls, cards drawn after their
+    contents, windowed controls crossing a frame, frames with no edit inside, and
+    `Controls_("x")`/`OnMClick` references to controls or macros that don't exist. It relies on
+    the `shpSec*` / `shpFrm*` / `shpHeader` / `shp<Button>` + `lbl<Button>[Icon]` naming above.
+- Run the layout check on the old, unstyled version too as a negative control — it should
+  report problems.
+- Long bold captions (about 28+ characters at 9pt Segoe UI Semibold) can run into a value
+  column at Left 210. Widen the gap or ask the user to check in the designer.
+- Restyling only moves and resizes controls. Keep every control name the macros use (grep the
+  macros for `Controls_("...")`, `gblMarkOut "..."` and `OnMClick` names) and diff the decoded
+  `Macros.Strings` items before and after — they should be identical.
 
 ## Reading existing JFAs
 

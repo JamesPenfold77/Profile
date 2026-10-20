@@ -26,6 +26,33 @@ The following constraints apply:
   but only *after* `Sub Main()` (i.e. after its `End Sub`). The cleanest
   pattern is to declare everything inside the `Sub`/`Function` that uses it.
   See Section 12 for the full placement rule.
+- **`Const` only accepts a literal constant** — a bare string or numeric
+  literal. Assigning the result of a function call (e.g. `Chr()`, `Chr(13) &
+  Chr(10)`) raises "Expected literal constant". Use `Dim` plus a normal
+  assignment statement instead for any value that isn't a literal.
+- **No `ByVal`/`ByRef` at a call site** — these keywords are only valid
+  inside a `Sub`/`Function`'s own parameter declaration. Writing them again
+  when *calling* that Sub/Function is a syntax error, and since a macro's
+  Subs/Functions are typically compiled together as one module, one bad call
+  like this can fail the whole macro's compile — breaking every code path in
+  the file, not just the one being called.
+- **`And`/`Or` do not short-circuit** — both sides are always evaluated. A
+  guard like `If bHasAppt And thisAppt.Duration > 0 Then` still touches
+  `thisAppt` when `bHasAppt` is False (runtime error on `Nothing`), and
+  `If UBound(a) >= 2 And a(2) = "X"` throws "Subscript out of range". Nest the
+  test as two `If`s instead.
+
+### Confirmed working (safe to use)
+
+- **Line continuation `_`** — confirmed in production macros (DEXREPORT_TEST,
+  DEXLOADORG_TEST: multi-line `If ... Or ... _` conditions, `MsgBox` text,
+  `Err.Raise` arguments), including a continued `Case "A", "B", _` list.
+- **`For Each` over a `Scripting.Dictionary`** (iterates keys) and over
+  collections returned by `Profile.LoadShortCodes`.
+- **Implicit locals in `Main`** — variables only used inside `Main` need no
+  `Dim`; anything read by another Sub/Function must be a module-level `Dim`
+  placed after `Main` (see Section 12 — a variable only *assigned* in `Main`
+  is local to `Main` and silently Empty elsewhere).
 
 ### Correct patterns
 
@@ -84,6 +111,33 @@ FormatTime(aTime)          ' see FormatTime / PadTwo in section 10
 ```
 
 ```vb
+' WRONG - Const with a function-call expression: "Expected literal constant"
+Const cTab = Chr(9)
+Const cCRLF = Chr(13) & Chr(10)
+
+' CORRECT - Dim plus a normal assignment
+Dim cTab
+Dim cCRLF
+cTab = Chr(9)
+cCRLF = Chr(13) & Chr(10)
+
+' Const is still fine for actual literals:
+Const cSctpName = "CasetypeMapping"
+```
+
+```vb
+' WRONG - ByVal/ByRef at the call site - syntax error
+Function IsFaceToFace(ByVal aShortCode)
+  ...
+End Function
+
+If IsFaceToFace(ByVal aType) Then   ' syntax error here
+
+' CORRECT - ByVal/ByRef belongs only in the declaration; call plainly
+If IsFaceToFace(aType) Then
+```
+
+```vb
 ' WRONG — declarative before Sub Main() causes a syntax error
 ' Macro: MyMacro
 Const olMailItem = 0      ' syntax error on this line
@@ -125,6 +179,13 @@ Always use `Profile.` factory methods rather than `CreateObject("Profile.xxx")`.
 | Load provider groups | `Profile.LoadProviderGroups(aFilter)` |
 | Load provider by **code string** | `Profile.LoadProvider(aCode)` |
 | Load provider by **integer ID** | `Profile.LoadProviderById(aID)` |
+| Import a Jaffa/Shortcode (.jfa) file | `Profile.JaffaImportByPath(sInPath, [sOutPath], [iReportStyle])` |
+| Load existing Shortcode records for a Type | `Profile.LoadShortCodes(aType)` |
+| Load a single Shortcode by Code + Type name | `LoadShortCodebyCodeSCTName(aCode, aTypeName)` (no `Profile.` prefix — global function, like `CreateFindObjectQueryRunParam` below) |
+| Load another macro's source (to share code) | `Profile.LoadShortCodeByCodeType(aMacroCode, 10).MacroText` — see Section 14 |
+| Log window for a long-running macro | `Profile.CreateOutputWindow` → `.AddText aLine` |
+| Modal progress bar | `Profile.CreateModalProcessDisplay(False)` → `.ProcessName`, `.MaxValue`, `.Position`, `.Caption`, `.AllowCancel` |
+| Registry Key values on a Provider/POS or Patient | `aObj.GetRegistryKeysByCode("KEYCODE")` → `.Count`, `.Item(0).KeyValue` |
 
 **IMPORTANT — two different LoadProvider methods:**
 
@@ -135,6 +196,238 @@ Set aProvObj = Profile.LoadProvider(aRule.ProviderID)
 ' CORRECT — use LoadProviderById when you have an integer ID
 Set aProvObj = Profile.LoadProviderById(aRule.ProviderID)
 ```
+
+### JaffaImportByPath — importing a generated .jfa file
+
+`Profile.JaffaImportByPath(BSTR sInPath, [in opt] BSTR sOutPath, [in opt] long iReportStyle) : void`
+
+Imports a Jaffa-format lookup/shortcode file (the `.jfa` format — HEAD/LNVR/SCTP/SHTC
+records etc.) directly into Profile, the same as using the file import UI. `sInPath`
+is the only required argument; `sOutPath` (an optional report file) and
+`iReportStyle` may be omitted in a late-bound call.
+
+Import matches an existing record by its **Code**, not by any GUID field in the
+file. When a macro generates a `.jfa` file meant to update existing records
+(e.g. re-running against a changed spreadsheet), leave each record's GUID field
+blank rather than generating a new one — a freshly generated GUID would not
+match the GUID already stored against the existing record, so Profile would
+create a duplicate instead of updating it.
+
+Being a Profile API call, wrap it per the Section 13 error-handling pattern, and
+prompt for confirmation before importing since it mutates live Profile data:
+
+```vb
+iResp = MsgBox("Import this file into Profile now?", 4 + 32, "Confirm Import")
+If iResp = 6 Then   ' vbYes
+  On Error Resume Next
+  Profile.JaffaImportByPath cOutPath
+  If Err.Number <> 0 Then
+    MsgBox "Import failed: " & Err.Description
+    Err.Clear
+  Else
+    MsgBox "Import completed."
+  End If
+  On Error GoTo 0
+End If
+```
+
+### The SHTC (Shortcode) record layout, per the Jaffa Specification
+
+The authoritative field layout for every Jaffa record type — including field
+names and order — lives in the Jaffa Specification export (a tab-delimited
+schema dump generated by Profile itself; ask the user for its path if a macro
+needs to touch a record type not already covered here). For `SHTC`, in field
+order (0-indexed position of each in the tab-delimited `.jfa` line):
+
+| idx | Field | idx | Field | idx | Field |
+|---|---|---|---|---|---|
+| 0 | RecordType | 10 | **IsDeleted** | 20 | Tag |
+| 1 | LineVersion | 11 | Privacy | 21 | MasterVersion |
+| 2 | Type | 12 | **GUID** | 22 | MasterDateTime |
+| 3 | Code | 13 | Color | 23 | ParentCodeGUID |
+| 4 | Description | 14 | OwnerPPPU | 24 | OwnerPPPUGUID |
+| 5 | TypeCode | 15 | Rate | 25 | AlertTypeLevel |
+| 6 | ParentCode | 16 | Rate2 | 26 | AlwaysVisible |
+| 7 | Output | 17 | AllowMultiple | 27 | GenderIdentityPreferredPronoun |
+| 8 | RefSysName | 18 | ParentCodeSysId | 28 | CustomProps |
+| 9 | RefSysNum | 19 | SystemID | 29 | *(EndOfFields terminator, always blank)* |
+
+`IsDeleted` is a plain `"F"`/`"T"` boolean field, same convention as other
+boolean-ish fields in this format (blank also reads as not-deleted on some
+record types, e.g. `SCTP`). Writing a Code's record with `IsDeleted = "T"`
+deletes that Shortcode entry on import.
+
+### Pattern: reconcile Profile against a source list, deleting what's gone
+
+When a macro regenerates a Jaffa file from an external source (a spreadsheet,
+a query) and that source is the sole source of truth, removed rows should
+delete the corresponding Profile record, not just leave it untouched. Do this
+by loading what Profile already has, crossing off everything the source still
+confirms, and writing a delete record for anything left over:
+
+```vb
+Dim aExistingDict
+Dim aExistingShtc
+Dim aItem
+
+Set aExistingDict = CreateObject("Scripting.Dictionary")
+
+On Error Resume Next
+Set aExistingShtc = Profile.LoadShortCodes(cSctpName)
+On Error GoTo 0
+
+If Not (aExistingShtc Is Nothing) Then
+  For Each aItem In aExistingShtc
+    If Not aExistingDict.Exists(aItem.Code) Then
+      aExistingDict.Add aItem.Code, True   ' value is unused - only key membership matters
+    End If
+  Next  'aItem
+End If
+
+' ... while writing each Code found in the source, remove it as matched:
+'   If aExistingDict.Exists(aKey) Then aExistingDict.Remove aKey
+'
+' ... afterward, whatever remains in aExistingDict no longer exists in the
+' source - write each as a delete record, GUID left blank same as normal
+' records, relying on Code matching (see IMPORTANT note below on why GUID
+' can't be populated here):
+'   Join(Array("SHTC", "3", cSctpName, aDelKey, "", ..., "T", "", "", ...), cTab)
+```
+
+**IMPORTANT — `aItem.GUID` is not exposed here, confirmed by a runtime error:**
+an earlier version of this pattern tried `aItem.GUID` to carry the real GUID
+into delete records for precise targeting. That raised `Object doesn't
+support this property or method: 'aItem.GUID'` at runtime — the object
+`Profile.LoadShortCodes` returns does not expose `GUID` through the COM
+scripting layer, even though `GUID` is a real field in the underlying SHTC
+record (per the Jaffa Specification table above) and `aItem.Code` works fine
+on the same object. This is the same class of gap documented for
+`CheckDayIsActive` in Section 3 — a field/method that exists on the internal
+Delphi interface but isn't surfaced on the scripting-layer object. Don't
+assume a field name from the Jaffa Specification (or from another record
+type's loader) will resolve as a property on a `Load*` object without
+testing it — treat each property as unverified until confirmed at runtime.
+
+Because of this, delete records here leave GUID blank exactly like
+create/update records — deletion relies on Code matching, the same mechanism
+JaffaImportByPath uses for updates (see above). There is currently no known
+way to get a Shortcode's real GUID from this macro environment; if a future
+need requires it, that would need re-testing (e.g. a different property
+name) rather than reusing `aItem.GUID`.
+
+**Confirmed working in production (2026-08-05):** this Code-matching,
+blank-GUID-on-every-record design — including the delete path — was verified
+against a real Profile environment (CASETYPEMAP macro v1.3, the
+CaseType Reason Mapping shortcode type) and correctly handled both updates
+and deletions. Treat this pattern as validated, not merely a theoretical
+workaround for the missing GUID property.
+
+`Profile.LoadShortCodes` itself was not documented anywhere before being
+confirmed in a live session — if a similarly-named loader is needed for
+another record type and isn't in this table, treat both the method's
+existence and every property on its returned items as unverified until
+confirmed the same way (by testing against Profile, or by the person who
+knows Profile's COM surface) rather than guessing at a name.
+
+### Pattern: validate a Code against a Shortcode's Description list
+
+A common need is checking whether a value (e.g. an appointment Reason Code)
+is one of the comma-delimited values in a Shortcode's Description — as
+CASETYPEMAP writes them (see the reconcile pattern above). Use
+`LoadShortCodebyCodeSCTName(aCode, aTypeName)` — note **no `Profile.`
+prefix**, it is a global function like `CreateFindObjectQueryRunParam` in
+Section 5 — to fetch a single Shortcode record by its own Code plus its
+Shortcode Type name, and check membership in its Description list:
+
+```vb
+' Function: isReasonValid
+' Returns True if aReasonCode is a permitted Reason Code for aCaseTypeCode,
+' per the "CaseType Reason Mapping" shortcode (Code = Case Type Code,
+' Description = comma-delimited Reason Codes). Intentionally uncached -
+' see the note below on why, for an Object Macro on Appointment Save.
+Function isReasonValid(aCaseTypeCode, aReasonCode)
+  Dim aServiceList
+  Dim sDescription
+  Dim sHaystack
+  Dim sNeedle
+
+  isReasonValid = False
+  If aCaseTypeCode = "" Then Exit Function
+  If aReasonCode = "" Then Exit Function
+
+  On Error Resume Next
+  Set aServiceList = LoadShortCodebyCodeSCTName(aCaseTypeCode, "CaseType Reason Mapping")
+  On Error GoTo 0
+  If aServiceList Is Nothing Then Exit Function
+
+  sDescription = ""
+  On Error Resume Next
+  sDescription = aServiceList.Description
+  On Error GoTo 0
+
+  sHaystack = "," & Trim(sDescription) & ","
+  sNeedle = "," & Trim(aReasonCode) & ","
+
+  isReasonValid = (InStr(1, sHaystack, sNeedle, vbTextCompare) > 0)
+End Function
+```
+
+Key points:
+- **Pad both sides with the delimiter before searching** —
+  `"," & Description & ","` vs `"," & aReasonCode & ","` — not a bare
+  `InStr(Description, aReasonCode)`. Without the padding this is a plain
+  substring search with no concept of token boundaries, so checking
+  `"OT"` would false-positive by matching inside `"BLUECAREOT"` even
+  though `"OT"` was never a real entry in that list. The comma padding
+  forces the match onto a whole comma-delimited token.
+- This is faster than `Split` + loop and should be preferred: `Split`
+  allocates an array and copies every substring into it up front, then a
+  loop pays interpreter overhead for two more function calls (`Trim`,
+  `StrComp`) per iteration. `InStr` does one native substring search over
+  the string as-is — no array, one call, no loop. Negligible per call on a
+  short list, but this runs on every Appointment Save across a clinic, so
+  it's worth avoiding the extra interpreter overhead on that hot path.
+- `vbTextCompare` as `InStr`'s 4th argument makes the match
+  case-insensitive; `Trim` on both sides handles stray whitespace. The
+  4-argument form requires the explicit `1` start-position argument.
+- `LoadShortCodebyCodeSCTName` and `.Description` are wrapped in
+  `On Error Resume Next` per Section 13, since — as the GUID incident above
+  shows — an unverified Profile object/property can throw instead of
+  returning `Nothing` on a miss.
+- A `Split` + loop variant (walking each comma-separated value with
+  `StrComp`) is a fine fallback if `InStr`'s 4-argument compare-mode form
+  ever behaves unexpectedly in this dialect, but has not been needed —
+  prefer the `InStr` version above.
+
+**Lists longer than 256 chars span several records (CASETYPEMAP 1.4+).**
+The Profile screen caps Description at 256 chars, so CASETYPEMAP splits a
+longer Reason list (only at commas) into `<Case Type>`, `<Case Type>~2`,
+`~3` ... with no gaps. Every reader must handle this:
+- One-off lookup (APPVALID 5.5 `IsReasonValid`): check the base record. If
+  the code isn't there, load `~2`, `~3` ... and stop at the first record
+  that doesn't exist (cap the loop, e.g. 20).
+- Load-all (DEXREPORT_TEST 11.18 `EnsureCaseTypeReasonsLoaded`): strip
+  `~N` from each Code and append its codes to the base Case Type's entry.
+  `LoadShortCodes` can return records in any order.
+A wildcard (`HCP*`) design was tried and rejected: it lets in unintended
+codes and can't handle lists with no common prefix.
+
+**Do not add caching (`Static`/module-level Dictionary) here by default.**
+It's tempting, but only pays off if the *same execution* calls this function
+more than once for the *same* key (e.g. validating several Reason Code
+fields on one appointment against the same Case Type) — check that before
+reaching for it. It is actively useless, not just unnecessary, in the common
+case this function was written for: an Object Macro triggered by Appointment
+Save, running server-side, called exactly once per save, with no state
+persisted between separate trigger firings (confirmed by the person running
+it in that environment). In that shape, a `Static` cache resets to empty on
+every single call — every save re-populates it from scratch and then reads
+it back once — so it adds the complexity and risk of an unverified `Static`
+construct for zero actual benefit. A single `LoadShortCodebyCodeSCTName`
+call plus a scan over a short comma list is already about as efficient as a
+one-shot lookup can be; there is no meaningfully faster way to do it once.
+Only reach for the cached variant if the call-count-per-execution question
+above comes back "more than once."
 
 ---
 
@@ -613,6 +906,10 @@ Set aProvider = Profile.LoadProvider(aRule.ProviderID)
 
 ## 5. Profile Type Library — Stored Query API
 
+The query definitions themselves can be exported as `.ihq` files and read with the
+**ihq-stored-query-format** skill. Each `?ask?` condition, in order, is `Parameters(n)`
+below, and the Select order is the column order of the output file.
+
 ```vb
 Dim aFilter
 Set aFilter = Profile.MakeFindObjectQueriesLoader()
@@ -946,6 +1243,114 @@ aControl.Cells(i, 1)       ' value in column 1 of row i
 Controls_("cboName").Text  ' selected text
 ```
 
+**IMPORTANT — visibility property is `IsVisible`, not `Visible`:** CDO Form
+controls fetched via `Controls_()` expose `IsVisible`, not the standard VCL
+`Visible` property. Setting `.Visible` on one of these objects is a runtime
+error. This was confirmed against a real form-repositioning macro
+(`SetServiceFields`) that toggles controls' visibility/position based on a
+selected service.
+
+```vb
+' WRONG - Controls_() objects don't expose Visible
+aCtrl.Visible = False
+
+' CORRECT
+aCtrl.IsVisible = False
+```
+
+`Enabled` and `Top`/`Left` are unaffected — those set normally as shown in the
+`SetServiceFields` pattern below.
+
+### Pattern: reposition/hide a set of controls by a keyed lookup
+
+A common CDO Form need: given some driving value (e.g. a selected Service
+Name), show and position one set of controls, and hide/disable every other
+control group tied to a different value. Encode each group as a
+`"key1;key2|control1;control2"` string (keys before `|`, controls after,
+both `;`-separated), and drive Top/Left from array position rather than
+literal per-row property values:
+
+```vb
+Sub SetServiceFields(ServiceName)
+  Dim aRows(6)
+  Dim aLefts(3)
+  Dim aRowParts
+  Dim aServices
+  Dim aControlNames
+  Dim aCtrl
+  Dim bMatch
+  Dim i
+  Dim j
+  Dim iPos
+  Dim iTop
+
+  aRows(0) = "IndivualSupport;GroupSupport;Respite;Meal;Home Maintenance;Domestic Assistance;Transport|lblVolunteer;rbVolunteerYes;rbVolunteerNo"
+  aRows(1) = "IndivualSupport;Meal|lblLocation;rbCommunity;rbHome"
+  aRows(2) = "Meal|lblMealType;rbMain;rbLight;rbSnack;rbBeveridge"
+  aRows(3) = "Meal|lblPrepOffsite;rbOffsiteYes;rbOffsiteNo"
+  aRows(4) = "Meal;Respite|lblOverNight;rbOvernightYes;rbOvernightNo"
+  aRows(5) = "Respite|lblMealsProvided;rbMealsGivenYes;rbMealsGivenNo"
+  aRows(6) = "Transport|lblClientEngagement;edtClientTime"
+
+  aLefts(0) = 75
+  aLefts(1) = 160
+  aLefts(2) = 235
+  aLefts(3) = 320
+
+  For i = 0 To UBound(aRows)
+    aRowParts = Split(aRows(i), "|")
+    aServices = Split(aRowParts(0), ";")
+    aControlNames = Split(aRowParts(1), ";")
+
+    bMatch = False
+    For j = 0 To UBound(aServices)
+      If Trim(aServices(j)) = ServiceName Then bMatch = True
+    Next  'j
+
+    ' Row Top starts at 460 for matched rows, +40 per row index
+    iTop = 460 + (i * 40)
+
+    For j = 0 To UBound(aControlNames)
+      Set aCtrl = Nothing
+      On Error Resume Next
+      Set aCtrl = Controls_(Trim(aControlNames(j)))
+      On Error GoTo 0
+
+      If Not (aCtrl Is Nothing) Then
+        If bMatch Then
+          aCtrl.IsVisible = True
+          aCtrl.Enabled = True
+          aCtrl.Top = iTop
+          If j = 0 Then
+            aCtrl.Left = 20
+          Else
+            iPos = j - 1
+            If iPos <= UBound(aLefts) Then aCtrl.Left = aLefts(iPos)
+          End If
+        Else
+          aCtrl.IsVisible = False
+          aCtrl.Enabled = False
+          aCtrl.Top = 555
+        End If
+      End If
+    Next  'j
+  Next  'i
+End Sub
+```
+
+Key points:
+- The first control in each row's list is treated as the row's Label and
+  gets `Left = 20`; subsequent controls take the next position from a fixed
+  `Left` array (`75, 160, 235, 320`).
+- `Controls_()` is wrapped in `On Error Resume Next` per Section 13 — a
+  control name from the data that doesn't exist on this particular form
+  instance shouldn't abort the whole loop.
+- Fixed-size `Dim aRows(6)` / `Dim aLefts(3)` plus one assignment per line is
+  used instead of `Array(...)` with line-continuation (`_`). That was written
+  before line-continuation was confirmed working (see Section 1 "Confirmed
+  working") — either style is fine now; one assignment per line is still
+  easier to diff.
+
 ---
 
 ## 10. Common Patterns
@@ -1128,6 +1533,65 @@ display, so anything pushed below line 1 may not appear.
 comments.** Declaratives (`Dim`, `Const`, etc.) placed there produce a syntax
 error. See Section 12 for full placement rules.
 
+### Version history block
+
+**Every time a new version of a macro is generated, add a version block**
+immediately after the macro name line, above the description. Each block
+follows this exact format:
+
+```vb
+'----------------------------------------------------------
+'Version 1.0
+'Author: Intrahealth Date: 17-Sep-24
+'1 to 2 line Brief description
+'----------------------------------------------------------
+```
+
+History accumulates in **descending order — latest version first** — so the
+most recent block sits directly under the macro name line, with older
+versions stacked below it:
+
+```vb
+' Macro: SlotAvailabilityReport
+'----------------------------------------------------------
+'Version 1.1
+'Author: Intrahealth Date: 03-Nov-24
+'Added POS filter and fixed epsilon rounding on slot overlap check
+'----------------------------------------------------------
+'Version 1.0
+'Author: Intrahealth Date: 17-Sep-24
+'Initial version — available/booked slot list for a date range
+'----------------------------------------------------------
+' -----------------------------------------------------------------------
+' Slot Availability Report — generates available/booked slot list
+' for a date range, provider group, and POS selection.
+' -----------------------------------------------------------------------
+
+Sub Main()
+  ...
+End Sub
+```
+
+Every block is still just a `'` comment, so this stays entirely within the
+"comments only before `Sub Main()`" rule above — do not let a version bump be
+the reason a `Dim`/`Const` sneaks above `Sub Main()`.
+
+Some older macros (e.g. DEXREPORT_TEST) put `Sub Main()` on line 1 and the
+version history as comments inside it — that also works; keep whichever
+layout the macro already uses.
+
+### Macro file name and description track the version
+
+A macro exported as a `.jfa` (a `TYPT` record — see the **jfa-format** skill,
+"Macro (TYPT) files") has a description field that Profile shows in its macro
+list, and the file name usually repeats it, e.g.
+`Macro - (DEXREPORT_TEST) Generate Dex Report as XML file (TEST v11.15 - output mode real, anonymised or both).jfa`.
+On every versioned update, change **both** the file name and the TYPT
+description to the new `vX.Y - <short summary>`, and keep the previous file
+as a `.bak` (the old file name makes it obvious which version it holds).
+A stale file name (e.g. still "v11.1" when the macro is internally 11.4) makes
+it easy to import or edit the wrong version.
+
 ---
 
 ## 12. Variable Declaration
@@ -1207,13 +1671,296 @@ On Error GoTo 0
 
 ---
 
-## 14. Source References
+## 14. Sharing code between macros (ExecuteGlobal)
+
+A macro can pull in another macro's Subs/Functions/module variables at run time:
+
+```vb
+Sub Main()
+ ExecuteGlobal Profile.LoadShortCodeByCodeType("GLBLFORMS", 10).MacroText
+ ExecuteGlobal Profile.LoadShortCodeByCodeType("DEXLOADORG_TEST", 10).MacroText
+ ...
+```
+
+- `10` is the Shortcode type for macros; `.MacroText` is the macro's source.
+- Everything in the loaded macro becomes global, **including its own
+  `Sub Main`**. The caller's `Main` that is already running carries on
+  normally, but any *later* call to `Main` runs the library's version
+  (confirmed with `cscript`). Generally: a Sub/Function with the same name in
+  two loaded macros is silently replaced by the one loaded last — avoid name
+  clashes between a macro and the libraries it loads.
+- Its module-level variables — even ones declared `Private` — are readable
+  from the calling macro (confirmed with `cscript`; read them inside
+  `On Error Resume Next` in case Profile's engine differs). Prefer calling the
+  library's public functions over reaching into its variables, though: if the
+  library changes, a caller that reads its internals breaks silently.
+- A library macro that sets file paths at module level (e.g. DEXLOADORG_TEST's
+  `aPath` to `OrganisationData V3.xml`, per `Profile.CurrentUserCode`) runs
+  that code at `ExecuteGlobal` time — check those paths when a report reads
+  the "wrong" file.
+
+## 15. Testing macros offline with cscript
+
+Windows' own `cscript.exe` runs VBScript, so a macro can be compile-checked and
+unit-tested on the dev machine without Profile. This caught real bugs several
+times (a VBScript `And` guard, a stub-invisible `Set` of `Empty`, off-by-one
+list counts) before the macro was ever imported.
+
+**Compile check (whole macro).** VBScript compiles the entire file before
+running anything, and a file whose top level only *declares* `Sub Main` never
+calls it — so appending one line and running it proves the whole macro
+parses, without executing any Profile code:
+
+```bash
+python -c "s=open('macro.vbs',encoding='utf-8').read(); open('syntax.vbs','w',encoding='utf-8',newline='').write(s.replace('\n','\r\n')+'\r\nWScript.Echo \"compiled OK\"\r\n')"
+cscript //nologo syntax.vbs
+```
+
+(If the check script itself fails to build — e.g. a Python escape error — the
+old `syntax.vbs` is still on disk and will print "compiled OK" for the
+*previous* version. Delete it first, or put the version number in the echo.)
+
+**Unit tests with stubs.** Copy the routines under test out of the macro
+(slice by `Function Name` ... `End Function`), then add VBScript `Class` stubs
+for the Profile objects they touch and a few test calls. Patterns that work:
+
+- Stub `ErrorMessage` as `Sub ErrorMessage(a,b,m) : WScript.Echo "LOG: " & m : End Sub`
+  to see every log line.
+- Stub `Profile` as a global object: `Class PF ... End Class` then
+  `Dim Profile : Set Profile = New PF`.
+- A stub collection that real code walks with `For Each` must be a COM
+  enumerable — a VBScript `Class` isn't. Return a `Scripting.Dictionary`
+  whose **keys** are the stub objects (`d.Add aObj, 1`); `For Each` over a
+  Dictionary yields its keys.
+- Real code that does `Set x = Profile.LoadSomething(...)` needs the stub to
+  return an **object**, not an `Array()` — `Set` of an array fails (and, under
+  `On Error Resume Next`, silently leaves `x` unset).
+- VBScript can't `Set` a variable to `Empty`, so the `IsEmpty(aEncounter.Attendance)`
+  branch can't be driven from a stub property; test the `Is Nothing` branch
+  instead and note the other as untestable offline.
+- Feed stubs from real exported data where possible (e.g. parse the
+  `CaseType Reason Mapping` shortcode `.jfa` export into `AddSC` stub calls)
+  so tests run against the live mapping, not hand-typed values.
+- **A form stub's `Controls_` must only know the controls that really exist.**
+  - A stub that creates whatever name is asked for hides "Object required:
+    'Form.Controls_(...)'". Profile raises that error when a macro builds a
+    control name that isn't on the form.
+  - Real case: the Demographic form's Update macro read
+    `Controls_("lblName" & suffix)`, but the Title row's label was the
+    original `Label2`, so the macro failed in Profile even though the stub
+    test passed.
+  - Fix for the stub: load the `object <Name>: TICDO...` names from the
+    `.jfa` DFM and return `Nothing` for anything else.
+  - Also tick or exercise every row in the test, not only the ones the
+    scenario happens to change; the failing row was never ticked in the stub
+    data.
+  - Add a static check too: for every `Controls_("prefix" & x)` in the code,
+    confirm prefix + each suffix exists on the form.
+- **Include a negative control**: after a test passes, deliberately break
+  the input (e.g. swap two XML elements) and confirm the test fails — this
+  proves the test can actually detect the problem.
+
+**Tooling traps from this environment:** writing the harness through a bash
+heredoc often mangles backslashes (Windows paths, `\N` in Python strings
+become escape errors). Write harness files with the Write tool, or use
+forward-slash paths where the path doesn't matter. MSXML 3.0 and 6.0
+(`Msxml2.DOMDocument`, `MSXML2.DOMDocument.6.0`, `MSXML2.XMLSchemaCache.6.0`)
+and `Scripting.FileSystemObject`/`Scripting.Dictionary` are all available to
+`cscript`, so XML-building code can be tested for real.
+
+## 16. Building and validating XML (MSXML)
+
+Macros that produce XML for external systems (e.g. the DEX upload in
+DEXREPORT_TEST — see the **dex-reporting** skill) build it with MSXML:
+
+```vb
+Set aXMLDoc = CreateObject("Msxml2.DOMDocument")        ' MSXML 3.0
+Set aRoot = aXMLDoc.createNode(1, "DEXFileUpload", "")  ' 1 = NODE_ELEMENT
+aXMLDoc.AppendChild aRoot
+' child elements via a small AddXmlNode(parent, name, value) helper
+aXMLDoc.save aFileName
+```
+
+**Element order matters when the schema uses `xs:sequence`.** An element
+written out of order is rejected ("invalid child element" / "Element X is
+unexpected according to content model") even though its value is fine, and
+optional elements (`minOccurs="0"`) must still sit in their sequence slot.
+When several Subs each append elements to the same parent, the order of the
+*calls* is the element order — keep a comment at the call site listing the
+required order, and flag-then-emit where one routine computes a value that
+the schema wants later (e.g. compute Quantity early, write it after TotalCost).
+
+**Validate against the XSD before saving** so errors show up in the macro's
+own log instead of the recipient's rejection report:
+
+1. Load the XSD into an `MSXML2.DOMDocument.6.0` and add it to an
+   `MSXML2.XMLSchemaCache.6.0` (`aSchemas.Add "", aXsdDoc` — empty target
+   namespace).
+2. The document to check must also be `DOMDocument.6.0` — an MSXML 3.0 doc
+   can't use a 6.0 schema cache. Copy it with `aCheck.loadXML aXMLDoc.xml`.
+3. Set `aCheck.validateOnParse = False` **before** `loadXML` (otherwise an
+   invalid document fails to load at all), and
+   `aCheck.setProperty "MultipleErrorMessages", True`.
+4. `Set aErr = aCheck.validate()` → `aErr.errorCode = 0` means valid; otherwise
+   loop `aErr.allErrors` (`.length`, `.item(i).reason`, `.item(i).errorXPath`).
+   `errorXPath` looks like `/DEXFileUpload/Sessions[1]/Session[3]/DessertCount[1]`
+   — select the `Session[3]` part and read its ID child to tell the user which
+   record is wrong.
+5. **`^`/`$` in `xs:pattern`.** In the XSD standard (which MSXML follows) `^`
+   and `$` are *literal* characters and every pattern is already anchored to
+   the whole value. Some schemas (DEX's, written for .NET, which treats them as
+   anchors) use `^...$` — under MSXML every value then fails. Strip a leading
+   `^` and trailing unescaped `$` from each `xs:pattern` in the loaded XSD
+   before adding it to the schema cache; that reproduces the check the
+   recipient applies.
+6. If the XSD file is missing, log a warning and carry on — don't block the run.
+
+Schema validation only catches structure and types. **Business rules** (e.g.
+"ServiceTypeId 302 requires Quantity") aren't in the XSD — those elements are
+usually optional there — so check them separately against whatever data
+source defines them.
+
+**File names.** Windows doesn't allow `\ / : * ? " < > |` in file names —
+use `yyyy-mm-dd HHMM` (no colon) for timestamps, and replace those characters
+(e.g. with `-`) in any user-supplied part such as a query name. Commas are fine.
+
+**Sharing output that contains patient data.** When the output holds PHI and
+may need to be shared for troubleshooting, give the macro an output switch
+(real file / anonymised file / both) rather than anonymising by hand. Build
+the anonymised copy from the *finished* document (so it always has the same
+structure) with dummy IDs kept consistent wherever the same ID appears, write
+a private real→dummy mapping file alongside it, and mark it (e.g. an XML
+comment "NOT FOR UPLOAD") — see the **dex-reporting** skill for the DEX
+implementation.
+
+---
+
+## 17. Profile Type Library — CDO Transactions (form data)
+
+A completed form (including a web form) is stored as a **CDO Transaction**.
+Its recorded values hang off `.Observations` as an HRC tree. Working example:
+`Profile/Customers/QCG/Macro - (WEBFORMDATA) Show Web Form data v1.1.jfa`.
+
+### Loading a patient's transactions
+
+```vb
+Set aFilter = CreateCDOTransactionFilter
+aFilter.Group = 1023          ' REQUIRED - see below
+Set aTransactions = thePatient.LoadCDOTransactions(aFilter)
+For i = 0 To aTransactions.Count - 1
+  Set aTrans = aTransactions.Item(i)
+  ...
+Next  'i
+```
+
+- **Set `Group` explicitly.** A new filter starts with `Group = 0`, and the
+  load uses it directly as the data-type set (it only defaults to "all" when
+  no filter is passed at all), so an unset filter returns nothing.
+  Values (bit flags, `USConstants.pas`): 1023 all, 1 all acquired,
+  2 pathology, 4 radiology, 8 discharge, 16 other acquired, 32 all local,
+  64 forms, 128 encounters, 256 scanned documents, 512 other local,
+  1024 referrals.
+- The filter has **no date properties** (only `Group`, `AccessRights`,
+  `OnlySigned`). Filter by date in the macro, e.g. on `aTrans.DisplayDate`
+  (use `< aEndDate + 1` to include the whole end day).
+- Useful `ISCDOTransaction` properties: `ID`, `TypeID`, `CID`, `DisplayDate`,
+  `CreatedOn`, `ModifiedOn`, `Recorder`, `Authorizer`, `IsDeleted`,
+  `IsSigned`, `Comment`, `Subject`, `Patient`.
+
+### Reading the form's data
+
+- `aTrans.Observations(1)` returns the HRC. The argument is
+  `TSTransactionChildrenAccessOption`: `0` (default, `tcaNotEmptyName`) hides
+  items with an empty name, `1` (`tcaAll`) returns everything.
+- `aHRC.CollectionName` is the form name, and `aHRC.TypeID` / `aHRC.ID` are
+  what `AddLink` / `SetVerbAndLinkId` take to link to the form (see
+  GLOBALMD906).
+- `aHRC.Count` / `aHRC.Item(j)` return `ISHRObservation`. Each one has `Name`,
+  `ConceptCode`, `TermsetCode`, `IsHri`, `AsHRI`, `AsHRC`.
+  - If `IsHri` is True it's a data item. Read the value with
+    `aObs.AsHRI.Content.GetValueAsString`, and fall back to
+    `aObs.AsHRI.AsString` when `Content Is Nothing`.
+  - If `IsHri` is False it's a nested group. Recurse into `aObs.AsHRC`.
+  - `aHRC.FindObservationByName("...")` gets one item directly.
+- Inside a form macro the current form's transaction is the global
+  `CDOTransaction` object, so `CDOTransaction.Observations` works the same way.
+
+---
+
+## 18. Profile Type Library — Updating a patient's demographics
+
+Working example: the QCG `Form Template - Demographic Information.jfa`, macro
+`OnbtnUpdateClientMClick`. All names below are from `IHProfBL.ridl` `ISPatient`
+and the `USPatient.pas` / `USAddress.pas` / `USPatientCard.pas` setters.
+
+- **Setters only change memory; call `aPatient.Save`** (wrap it in
+  `On Error Resume Next` and check `Err`). Save fires patient-save macros.
+  `Profile.Patient` is its own cached object, separate from an open Patient
+  Details window.
+- Names: use **`FirstNames`** (get and set the whole field). `FirstName`
+  *gets* only the first word but *sets* the whole field. `Lastname`,
+  `PreferredName`, `Title` (free text, normalised to the title short code on
+  save if the practice restricts titles). Name setters raise an error on
+  invalid characters unless `DisablePatientNameRestriction` is set.
+- `DOB` is a Date. `Sex` takes one character: "M", "F" or "X".
+- Phones: `CellPhone`, `HomePhone`, `WorkPhone`, `OtherPhone`, `Email`.
+  `PreferredPhoneType` is an integer: 0 none, 1 Home, 2 Work, 3 Other,
+  4 Mobile (5 Additional is ignored by the setter). Use the numbers, because
+  the enum names may not exist in the script engine. `GetPreferredPhone()`
+  reads the preferred number. `PreferredNotificationMethod`: 0 Letter,
+  1 Email, 2 SMS.
+- Addresses: `StreetAddress` / `PostalAddress` are get-only, but the returned
+  `ISAddress` writes straight through: `.Street`, `.Suburb`, `.City`,
+  `.Code` (postcode), `.Building`.
+  - **`.State` takes the state code** ("QLD"), and an unknown code silently
+    clears the state. Set it, then read it back to confirm.
+  - The letter field `AddressStreet2` is `.Suburb` and `AddressStreet3` is
+    `.City`.
+- Cards (Medicare, Pension, DVA): `aPatient.Cards` (`Count`, `Item(i)`).
+  - Each card has `Alias` (payer alias code: "MEDICARE", "PEN", "DVA",
+    "HCC"), `CardNumber`, `Reference`, `ExpiryDate`, `StartedDate`.
+    `CardType` is the payer's surname, not the alias.
+  - After setting properties on an existing card, call `aCard.SetModified`.
+  - Add a card with
+    `aPatient.UpdateCardDetailsEX(alias, number, reference, startDate, expiryDate)`,
+    which returns the card or Nothing.
+  - Avoid plain `UpdateCardDetails`. It matches existing cards on the payer
+    surname and ignores expired cards, so it can add duplicate cards.
+  - The letter fields `Medicare`, `Pension` and `DVA` read the most recent card
+    for that payer, including expired cards. `PensionExpiryDate` and
+    `DVAExpiryDate` add a tab plus `!!!` when expired.
+- **DVA card colour** has no field of its own. It's in the card's `Name` text
+  ("Gold" / "White" / "Orange"), which comes from the plan template.
+  `UpdateCardDetailsEX` names a new card after the alias, so the colour is
+  lost.
+- **Private health fund**: there's no patient property. It's a card whose
+  `Alias` isn't a government one (MEDICARE / DVA / PEN / HCC ...). The fund
+  name is `card.CardType` and the member number is `card.CardNumber`. Scripts
+  can't see the payer type, so "is a fund" is a heuristic.
+- **Referring doctor / GP**: there's no patient property. They are care-team
+  slots 1-8:
+  - `aPatient.ExternalDr1`..`ExternalDr8` (read-only `ISExternalProvider`:
+    `ID`, `FullName`, `Phone1`, `PlaceName`).
+  - Write a slot with `ExternalDrNId = id` or `ExternalDrNCode = code`.
+  - Which slot is which role is set per site: check
+    `Profile.ExtProviderRelationTitle(n)`.
+  - Find a doctor with `Profile.FindExtProviderByName(name)`, which needs an
+    exact match and returns Nothing on 0 or more than one match. Also
+    `LoadExternalProvider(code)` and `LoadExternalProviderById(id)`.
+  - Letter fields: `Letter.Patient.CareTeam("<role>").FullName` etc.
+- Yes/No prompt: `Profile.MsgBox(text, vbYesNo + vbQuestion, title) = vbYes`.
+
+---
+
+## 19. Source References
 
 - COM scripting layer (rules):    `Profile/Common/Infrastructure/Scripting/USAppointmentRule.pas`
 - COM scripting layer (groups):   `Profile/Common/Infrastructure/Scripting/USProviderGroups.pas`
 - COM scripting layer (profile):  `Profile/Common/Infrastructure/Scripting/USProfileEx.pas`
 - Filter interface (rules):       `Profile/Common/Infrastructure/Scripting/USAppointmentRuleFilter.pas`
 - Business logic (rules):         `Profile/Common/Business/UBAppointmentRules.pas`
+- CDO transactions / form data:   `Profile/Common/Infrastructure/Scripting/USCDOTransaction.pas`,
+  `USCDOTransactions.pas`, `USCDOTransactionFilter.pas`, `USHRObservation.pas`, `USCDOContent.pas`
 - Technical overview:             `docs/Technical/Appointments/appointment-rules-and-templates-overview.md`
 
 All in repo: `https://github.com/intrahealth-source/profile`
