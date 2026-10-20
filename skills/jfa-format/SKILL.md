@@ -1,3 +1,8 @@
+---
+name: jfa-format
+description: The Profile JFA (Jaffa) file format - HEAD/LNVR/OBSV/TYPT records, field encoding, the CDO form DFM, control palette and scripting limits, and the optional "modern" form style (header bar, cards, rounded buttons and input frames) with preview and layout-check tools. Use when reading, generating or restyling a .jfa form or macro export.
+---
+
 # Skill: JFA (Jaffa) File Format
 
 Status: **partially validated** — earlier source-reading combined with empirical validation against a working CDO Form sample (April 2026). The first-pass pipeline at `generators/pdf_to_jfa/` produces JFA files that import cleanly into Profile EMR (Hello World form + Pelvic Floor consent form, both validated end-to-end). Remaining unknowns are in "Open questions" at the end.
@@ -438,6 +443,109 @@ exposes. Confirmed facts, so the next form doesn't need to re-derive them from s
   unmodified and not new. Opening an existing record and hitting Save without changing anything
   never runs your validate-save macro at all in that case; this only matters if you need
   validation to catch a resave-with-no-changes scenario (it won't).
+
+## Optional "modern" form style — offer it, ask before using
+
+James approved a web-page-like style for the QCG Demographic Information form ("Client Form
+Update", Oct 2026). **When creating a new form (or doing a substantial redesign), offer this
+style and ask the user before applying it.** Don't apply it by default and don't restyle an
+existing form unasked. It isn't always appropriate:
+
+- **Good fit:** tool or utility forms driven by macros (review/compare/update screens, launchers,
+  dashboards), and forms opened from a toolbar button rather than printed.
+- **Usually not a fit:**
+  - Forms that must look like a paper original, such as consent forms built with the
+    pixel-perfect PDF overlay (see the **pdf-to-jfa-generator** skill).
+  - Forms that are mainly printed.
+  - Forms that must match a customer's existing set of forms.
+  - Very dense data-entry forms, where cards cost too much vertical space.
+- When asking, name what it involves (Segoe UI, a blue header bar, section cards, rounded icon
+  buttons, orange difference highlighting) so the user can pick parts of it.
+
+**Reference implementations** — copy their DFM blocks rather than reinventing them:
+
+- `Profile/Customers/QCG/Form Template - Demographic Information.jfa` (V 1.0.7 JP): header bar,
+  section cards, rounded buttons, difference highlighting. A wide review/compare layout.
+- `Profile/Customers/Hauora Waikato/Way Back Phone Client V1.5.6.jfa` (Oct 2026): a small
+  data-entry form. Adds rounded input frames, a header icon glyph, a white secondary button,
+  and field labels in the heading style. It was made by generating the whole `Page_1` control
+  tree from a short Python list (small `shape()`/`label()`/`button()` helpers that emit
+  `object ... end` blocks) and splicing it into the decoded DFM, leaving `Macros.Strings`
+  untouched. For a full restyle that is easier to adjust than hand-editing every control.
+
+### Elements
+
+| Element | How it's built |
+|---|---|
+| Font | Root form `Font.Name = 'Segoe UI'`, `Font.Height = -12`, plus `Font.Charset`, `Font.Color` and `Font.Style`. Every control with `ParentFont = False` must also get `Font.Name` and `Font.Height`, or it falls back to the old default. Use `'Segoe UI Semibold'` for headings and button text. |
+| Header bar | A full-width `TICDOShape` (`FillColor` = `BorderColor` = `$00EB6325`, i.e. #2563EB, Height 44) at the top. The title label sits on it with `ParentColor = False`, `Color = $00EB6325`, `Font.Color = clWhite`, `Font.Height = -20`, Semibold. |
+| Section cards | A `TICDOShape` with `Shape = stRoundRect`, `FillColor = clWhite`, `BorderColor = $00E2DDD9` (#D9DDE2). Each card has a blue Semibold heading label, then rows 22 px apart. Gap of 12 px between cards. |
+| Rounded button | Three controls, **each with the same `OnMClick`**: a `TICDOShape` (`stRoundRect`, blue, Height 28); an icon `TICDOLabel` (`Font.Name = 'Segoe MDL2 Assets'`, `Caption = #<glyph>`, e.g. `#59194` = U+E73A checklist, `#59214` = U+E74E save); and a text `TICDOLabel`. Both labels have `ParentColor = False`, `Color = $00EB6325`, white Semibold font, `AutoSize = False`. Use plain ASCII captions plus `#NNNNN` for glyphs; don't put raw non-ASCII in the DFM. |
+| Secondary button | Same three controls as the rounded button, but `FillColor = clWhite`, `BorderColor = $00E2DDD9`, labels `Color = clWhite`, text `Font.Color = $00404040`. Use it for Cancel next to a blue OK. Glyphs: `#59214` (U+E74E save) for OK, `#59153` (U+E711 cancel) for Cancel. |
+| Header icon | A `TICDOLabel` on the header bar with `Font.Name = 'Segoe MDL2 Assets'`, `Font.Height = -18`, white, `ParentColor = False`, `Color = $00EB6325`, `AutoSize = False`, e.g. `#59159` (U+E717 phone). Replace small grey icon `TICDOImage`s with a glyph like this: a JPEG/PNG with a light background shows as a box on the blue bar. Put the title label 30 px further right. |
+| Rounded input frame | Set the `TICDOEdit`/`TICDOMemo` to `BorderStyle = bsNone`, `Color = clWhite`, then put a `TICDOShape` (`stRoundRect`, `FillColor = clWhite`, `BorderColor = $00AFA39C` i.e. #9CA3AF, slightly darker than card borders) **behind** it, 5 px bigger left/top and about 4 px right/bottom. Name frames `shpFrm<Field>`. For a single-line edit: frame Height 25, edit Height 17, edit Top = frame Top + 4. Works for lookup (`edtyLookup`) and date edits — their button draws inside the frame. Not for radio buttons and checkboxes (they draw their own marks). |
+| Field labels (option) | Default is bold Segoe UI -12 black (`Font.Style = [fsBold]`). Alternative the Way Back form uses: the section-heading style without bold — `Font.Name = 'Segoe UI Semibold'`, `Font.Height = -13`, `Font.Color = $00EB6325`, Height 17, Top 1 px above the old row Top. Measure caption widths (e.g. with Pillow and `seguisb.ttf` at 13 px) so the longest label ends before the input column. |
+| Difference highlight | Done at runtime: `Form.Controls_("x").FontColor = &H000C58EA` (#EA580C orange) or `&H80000008` (clWindowText). `FontColor` is a generic `ISControl` property. |
+| Save prompt | For a tool form that stores no data of its own, set root `NeedToSave = False` so closing it doesn't ask to save. Not for forms that record data. |
+
+### Constraints that shape the style (from the CDO control source)
+
+- **`TICDOButton` can't be styled.** It's a plain VCL `TButton`: no icon, no colour, square
+  corners. That's why rounded buttons are a shape plus labels. `TICDOShape`, `TICDOLabel` and
+  `TICDOImage` all support `OnMClick`.
+- **Labels are never transparent.** `TILabel` forces `Transparent := False` and doesn't publish
+  it. Any label on a coloured shape must set `ParentColor = False` and `Color` to the shape's
+  fill, or a rectangle shows. On white cards over a white page nothing extra is needed.
+- **`TICDOCheckBox` has no published `Color`.** Checkboxes keep the page background, so
+  alternating row shading and coloured cards behind checkboxes don't work. Keep cards white.
+- **Z-order is DFM order.** Shapes and labels are graphic controls; later in the DFM means
+  drawn on top. Put the header and card shapes before the controls on them. Windowed controls
+  (checkboxes, edits) always draw above graphic ones.
+- A `TICDOImage` PNG button (picture with rounded corners) is the other option. It's the most
+  web-like, but the text is baked into the image, and it has no hover, focus or tab order.
+- Segoe UI and Segoe MDL2 Assets ship with Windows 10/11. On an older OS, icons show as empty
+  squares.
+- **Rounded buttons can't be reached with Tab or Enter.** Shapes and labels aren't windowed, so
+  they take no focus. Tell the user when replacing `TICDOButton`s on a keyboard-heavy form.
+- **`TShape` has no radius property.** VCL draws `stRoundRect` with a corner ellipse
+  `min(Width, Height) div 4` wide, so the radius is about 1/8 of the shorter side. Cards and
+  big memos look clearly rounded; a 25 px input frame only gets about 3 px corners.
+- **A windowed control always draws over a frame.** Any edit/memo that overlaps another field's
+  frame hides part of that frame's border (e.g. a borderless Case edit 1 px into the Contact
+  details frame below it). Keep every windowed control either fully inside its own frame or
+  clear of all frames.
+- **A borderless edit's text sits at the top-left of its area.** That's why the edit is shorter
+  than its frame. Ask the user to check vertical centring in the designer.
+- **Clicks on a frame's margin don't reach the edit.** Keep margins small (4-5 px).
+- **Focus highlight is only partly possible.** `ISShape.BorderColor`/`BorderWidth` can be set
+  from a macro, and `TICDOEdit`/`TICDOComboBox` have `OnMEnter`, but there's no `OnMExit` and
+  `TICDOMemo` has neither. A "blue frame on the focused field" can only be cleared when the next
+  edit is entered. Leave it out unless the user asks.
+- **`gblMarkOut` (GLBLFORMS) paints a label with the practice's mandatory-field colour**
+  (`Profile.SystemPreference("Workspace.MandatoryFieldColor")`, usually yellow) by setting the
+  control's `Color`. It clashes with this style. Remove the call and do the mandatory check in
+  the OK/validate macro instead — it only changes colour, nothing else depends on it.
+
+### When generating
+
+- **Tools** (in `Profile/skills/jfa-format/tools/`, need Python + Pillow + the Windows Segoe
+  fonts):
+  - `python -I jfa_preview.py <form.jfa> [out.png]` draws an approximate PNG of the form's
+    first page, with control names as placeholder text (no data). Use it to check the look
+    and show the user before they import. It is not exact (text baselines, lookup buttons,
+    themes), so still ask them to check in the CDO designer.
+  - `python -I jfa_layout_check.py <form.jfa>` exits 1 and lists problems: controls outside the
+    form, row controls straddling a card edge, overlapping controls, cards drawn after their
+    contents, windowed controls crossing a frame, frames with no edit inside, and
+    `Controls_("x")`/`OnMClick` references to controls or macros that don't exist. It relies on
+    the `shpSec*` / `shpFrm*` / `shpHeader` / `shp<Button>` + `lbl<Button>[Icon]` naming above.
+- Run the layout check on the old, unstyled version too as a negative control — it should
+  report problems.
+- Long bold captions (about 28+ characters at 9pt Segoe UI Semibold) can run into a value
+  column at Left 210. Widen the gap or ask the user to check in the designer.
+- Restyling only moves and resizes controls. Keep every control name the macros use (grep the
+  macros for `Controls_("...")`, `gblMarkOut "..."` and `OnMClick` names) and diff the decoded
+  `Macros.Strings` items before and after — they should be identical.
 
 ## Reading existing JFAs
 

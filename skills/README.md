@@ -6,7 +6,9 @@ Reusable knowledge documents capturing hard-won lessons from Profile EMR develop
 
 ### CDO Forms
 
-- **[jfa-format](jfa-format/SKILL.md)** — the JFA file format used by Profile's CDO Forms system. Record types (HEAD/LNVR/OBSV), field positions per record, the 4 OBSV class codes, jaffa value encoding, the embedded DFM payload, the control palette. Also macro exports (TYPT records) and their decode/edit/re-encode workflow. Source-level Pascal references plus empirically-validated facts from real imports.
+- **[jfa-format](jfa-format/SKILL.md)** — the JFA file format used by Profile's CDO Forms system. Record types (HEAD/LNVR/OBSV), field positions per record, the 4 OBSV class codes, jaffa value encoding, the embedded DFM payload, the control palette. Also macro exports (TYPT records) and their decode/edit/re-encode workflow. Source-level Pascal references plus empirically-validated facts from real imports. Includes the optional "modern" form style (header bar, section cards, rounded buttons and input frames) and two tools in `jfa-format/tools/`: `jfa_preview.py` (draws a PNG preview of a form) and `jfa_layout_check.py` (offline layout and control-reference check).
+
+- **[ih-edit-jfa-forms](ih-edit-jfa-forms/SKILL.md)** — step-by-step workflow for editing an existing `.jfa` CDO form: the `\0d\0a` vs `^^^` escaping traps, splicing and rewrapping `Macros.Strings` items safely, verifying before writing back, version-label bumps, and patterns for macro-driven forms (never-saved call-log forms, Cancel/X close-query prompts, moving a form to another folder). Pairs with the **jfa-format** skill. Also kept as a Claude Code project skill in the Intrahealth Profile source repo at `.claude/skills/ih-edit-jfa-forms/` — keep the two copies in step.
 
 - **[pdf-to-jfa-generator](pdf-to-jfa-generator/SKILL.md)** — the Python pipeline at `generators/pdf_to_jfa/` that produces JFA files from PDFs (or from scratch). Architecture, the calibration loop, recipes for adding new forms, common failure modes. Pairs with the **jfa-format** skill.
 

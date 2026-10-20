@@ -399,6 +399,19 @@ Key points:
   ever behaves unexpectedly in this dialect, but has not been needed —
   prefer the `InStr` version above.
 
+**Lists longer than 256 chars span several records (CASETYPEMAP 1.4+).**
+The Profile screen caps Description at 256 chars, so CASETYPEMAP splits a
+longer Reason list (only at commas) into `<Case Type>`, `<Case Type>~2`,
+`~3` ... with no gaps. Every reader must handle this:
+- One-off lookup (APPVALID 5.5 `IsReasonValid`): check the base record. If
+  the code isn't there, load `~2`, `~3` ... and stop at the first record
+  that doesn't exist (cap the loop, e.g. 20).
+- Load-all (DEXREPORT_TEST 11.18 `EnsureCaseTypeReasonsLoaded`): strip
+  `~N` from each Code and append its codes to the base Case Type's entry.
+  `LoadShortCodes` can return records in any order.
+A wildcard (`HCP*`) design was tried and rejected: it lets in unintended
+codes and can't handle lists with no common prefix.
+
 **Do not add caching (`Static`/module-level Dictionary) here by default.**
 It's tempting, but only pays off if the *same execution* calls this function
 more than once for the *same* key (e.g. validating several Reason Code
@@ -1433,6 +1446,21 @@ for the Profile objects they touch and a few test calls. Patterns that work:
 - Feed stubs from real exported data where possible (e.g. parse the
   `CaseType Reason Mapping` shortcode `.jfa` export into `AddSC` stub calls)
   so tests run against the live mapping, not hand-typed values.
+- **A form stub's `Controls_` must only know the controls that really exist.**
+  - A stub that creates whatever name is asked for hides "Object required:
+    'Form.Controls_(...)'". Profile raises that error when a macro builds a
+    control name that isn't on the form.
+  - Real case: the Demographic form's Update macro read
+    `Controls_("lblName" & suffix)`, but the Title row's label was the
+    original `Label2`, so the macro failed in Profile even though the stub
+    test passed.
+  - Fix for the stub: load the `object <Name>: TICDO...` names from the
+    `.jfa` DFM and return `Nothing` for anything else.
+  - Also tick or exercise every row in the test, not only the ones the
+    scenario happens to change; the failing row was never ticked in the stub
+    data.
+  - Add a static check too: for every `Controls_("prefix" & x)` in the code,
+    confirm prefix + each suffix exists on the form.
 - **Include a negative control**: after a test passes, deliberately break
   the input (e.g. swap two XML elements) and confirm the test fails — this
   proves the test can actually detect the problem.
@@ -1512,13 +1540,132 @@ implementation.
 
 ---
 
-## 14. Source References
+## 14. Profile Type Library — CDO Transactions (form data)
+
+A completed form (including a web form) is stored as a **CDO Transaction**.
+Its recorded values hang off `.Observations` as an HRC tree. Working example:
+`Profile/Customers/QCG/Macro - (WEBFORMDATA) Show Web Form data v1.1.jfa`.
+
+### Loading a patient's transactions
+
+```vb
+Set aFilter = CreateCDOTransactionFilter
+aFilter.Group = 1023          ' REQUIRED - see below
+Set aTransactions = thePatient.LoadCDOTransactions(aFilter)
+For i = 0 To aTransactions.Count - 1
+  Set aTrans = aTransactions.Item(i)
+  ...
+Next  'i
+```
+
+- **Set `Group` explicitly.** A new filter starts with `Group = 0`, and the
+  load uses it directly as the data-type set (it only defaults to "all" when
+  no filter is passed at all), so an unset filter returns nothing.
+  Values (bit flags, `USConstants.pas`): 1023 all, 1 all acquired,
+  2 pathology, 4 radiology, 8 discharge, 16 other acquired, 32 all local,
+  64 forms, 128 encounters, 256 scanned documents, 512 other local,
+  1024 referrals.
+- The filter has **no date properties** (only `Group`, `AccessRights`,
+  `OnlySigned`). Filter by date in the macro, e.g. on `aTrans.DisplayDate`
+  (use `< aEndDate + 1` to include the whole end day).
+- Useful `ISCDOTransaction` properties: `ID`, `TypeID`, `CID`, `DisplayDate`,
+  `CreatedOn`, `ModifiedOn`, `Recorder`, `Authorizer`, `IsDeleted`,
+  `IsSigned`, `Comment`, `Subject`, `Patient`.
+
+### Reading the form's data
+
+- `aTrans.Observations(1)` returns the HRC. The argument is
+  `TSTransactionChildrenAccessOption`: `0` (default, `tcaNotEmptyName`) hides
+  items with an empty name, `1` (`tcaAll`) returns everything.
+- `aHRC.CollectionName` is the form name, and `aHRC.TypeID` / `aHRC.ID` are
+  what `AddLink` / `SetVerbAndLinkId` take to link to the form (see
+  GLOBALMD906).
+- `aHRC.Count` / `aHRC.Item(j)` return `ISHRObservation`. Each one has `Name`,
+  `ConceptCode`, `TermsetCode`, `IsHri`, `AsHRI`, `AsHRC`.
+  - If `IsHri` is True it's a data item. Read the value with
+    `aObs.AsHRI.Content.GetValueAsString`, and fall back to
+    `aObs.AsHRI.AsString` when `Content Is Nothing`.
+  - If `IsHri` is False it's a nested group. Recurse into `aObs.AsHRC`.
+  - `aHRC.FindObservationByName("...")` gets one item directly.
+- Inside a form macro the current form's transaction is the global
+  `CDOTransaction` object, so `CDOTransaction.Observations` works the same way.
+
+---
+
+## 15. Profile Type Library — Updating a patient's demographics
+
+Working example: the QCG `Form Template - Demographic Information.jfa`, macro
+`OnbtnUpdateClientMClick`. All names below are from `IHProfBL.ridl` `ISPatient`
+and the `USPatient.pas` / `USAddress.pas` / `USPatientCard.pas` setters.
+
+- **Setters only change memory; call `aPatient.Save`** (wrap it in
+  `On Error Resume Next` and check `Err`). Save fires patient-save macros.
+  `Profile.Patient` is its own cached object, separate from an open Patient
+  Details window.
+- Names: use **`FirstNames`** (get and set the whole field). `FirstName`
+  *gets* only the first word but *sets* the whole field. `Lastname`,
+  `PreferredName`, `Title` (free text, normalised to the title short code on
+  save if the practice restricts titles). Name setters raise an error on
+  invalid characters unless `DisablePatientNameRestriction` is set.
+- `DOB` is a Date. `Sex` takes one character: "M", "F" or "X".
+- Phones: `CellPhone`, `HomePhone`, `WorkPhone`, `OtherPhone`, `Email`.
+  `PreferredPhoneType` is an integer: 0 none, 1 Home, 2 Work, 3 Other,
+  4 Mobile (5 Additional is ignored by the setter). Use the numbers, because
+  the enum names may not exist in the script engine. `GetPreferredPhone()`
+  reads the preferred number. `PreferredNotificationMethod`: 0 Letter,
+  1 Email, 2 SMS.
+- Addresses: `StreetAddress` / `PostalAddress` are get-only, but the returned
+  `ISAddress` writes straight through: `.Street`, `.Suburb`, `.City`,
+  `.Code` (postcode), `.Building`.
+  - **`.State` takes the state code** ("QLD"), and an unknown code silently
+    clears the state. Set it, then read it back to confirm.
+  - The letter field `AddressStreet2` is `.Suburb` and `AddressStreet3` is
+    `.City`.
+- Cards (Medicare, Pension, DVA): `aPatient.Cards` (`Count`, `Item(i)`).
+  - Each card has `Alias` (payer alias code: "MEDICARE", "PEN", "DVA",
+    "HCC"), `CardNumber`, `Reference`, `ExpiryDate`, `StartedDate`.
+    `CardType` is the payer's surname, not the alias.
+  - After setting properties on an existing card, call `aCard.SetModified`.
+  - Add a card with
+    `aPatient.UpdateCardDetailsEX(alias, number, reference, startDate, expiryDate)`,
+    which returns the card or Nothing.
+  - Avoid plain `UpdateCardDetails`. It matches existing cards on the payer
+    surname and ignores expired cards, so it can add duplicate cards.
+  - The letter fields `Medicare`, `Pension` and `DVA` read the most recent card
+    for that payer, including expired cards. `PensionExpiryDate` and
+    `DVAExpiryDate` add a tab plus `!!!` when expired.
+- **DVA card colour** has no field of its own. It's in the card's `Name` text
+  ("Gold" / "White" / "Orange"), which comes from the plan template.
+  `UpdateCardDetailsEX` names a new card after the alias, so the colour is
+  lost.
+- **Private health fund**: there's no patient property. It's a card whose
+  `Alias` isn't a government one (MEDICARE / DVA / PEN / HCC ...). The fund
+  name is `card.CardType` and the member number is `card.CardNumber`. Scripts
+  can't see the payer type, so "is a fund" is a heuristic.
+- **Referring doctor / GP**: there's no patient property. They are care-team
+  slots 1-8:
+  - `aPatient.ExternalDr1`..`ExternalDr8` (read-only `ISExternalProvider`:
+    `ID`, `FullName`, `Phone1`, `PlaceName`).
+  - Write a slot with `ExternalDrNId = id` or `ExternalDrNCode = code`.
+  - Which slot is which role is set per site: check
+    `Profile.ExtProviderRelationTitle(n)`.
+  - Find a doctor with `Profile.FindExtProviderByName(name)`, which needs an
+    exact match and returns Nothing on 0 or more than one match. Also
+    `LoadExternalProvider(code)` and `LoadExternalProviderById(id)`.
+  - Letter fields: `Letter.Patient.CareTeam("<role>").FullName` etc.
+- Yes/No prompt: `Profile.MsgBox(text, vbYesNo + vbQuestion, title) = vbYes`.
+
+---
+
+## 16. Source References
 
 - COM scripting layer (rules):    `Profile/Common/Infrastructure/Scripting/USAppointmentRule.pas`
 - COM scripting layer (groups):   `Profile/Common/Infrastructure/Scripting/USProviderGroups.pas`
 - COM scripting layer (profile):  `Profile/Common/Infrastructure/Scripting/USProfileEx.pas`
 - Filter interface (rules):       `Profile/Common/Infrastructure/Scripting/USAppointmentRuleFilter.pas`
 - Business logic (rules):         `Profile/Common/Business/UBAppointmentRules.pas`
+- CDO transactions / form data:   `Profile/Common/Infrastructure/Scripting/USCDOTransaction.pas`,
+  `USCDOTransactions.pas`, `USCDOTransactionFilter.pas`, `USHRObservation.pas`, `USCDOContent.pas`
 - Technical overview:             `docs/Technical/Appointments/appointment-rules-and-templates-overview.md`
 
 All in repo: `https://github.com/intrahealth-source/profile`
